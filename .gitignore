@@ -1,15 +1,13 @@
-# Data
+# Raw and derived data (large — never commit: ~66 GB)
 data/
-data_pyg/
-*.npz
-*.msh
+# Training artifacts, checkpoints, logs
+runs/
+# Model checkpoints anywhere
 *.pt
-
+# SDD scratch (progress ledger, briefs, review packages)
+.superpowers/
 # Python
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
-.vscode/
-
-# Env
-env/
+.pytest_cache/

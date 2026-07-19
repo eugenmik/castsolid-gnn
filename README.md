@@ -1,227 +1,184 @@
-# casting-gnn-solidification — GNN surrogate for casting solidification on tetra meshes
+# Casting Solidification GNN
 
-> **Project status:** **WIP / in active development.**  
-> The end-to-end pipeline works, but interfaces, configs, and training/visualization behavior are still evolving.  
-> Expect breaking changes; please pin commits if you depend on this code.
+A graph neural network that predicts, for a metal casting, **how long every point takes to solidify** and **where the last-to-freeze hot spots are** - the zones that shrink and form porosity. It works directly on a real casting's STEP file and generalizes from 42 simple training shapes to parts it has never seen.
 
-A research/engineering repository for learning thermal diffusion / cooling dynamics during metal solidification on tetrahedral meshes using Graph Neural Networks (PyTorch Geometric).
+<p align="center">
+  <img src="assets/solidification.gif" alt="Solidification playback in the web viewer" width="640"><br>
+  <em>The web viewer replaying a predicted solidification front: already-frozen material fades to a ghost, still-liquid metal stays opaque, and the last pocket to solidify is the hot spot.</em>
+</p>
 
-The core idea is to convert each casting mesh into a graph and train a MeshGraphNet-style model to predict temperature evolution (delta-learning), enabling fast inference and hotspot analysis.
+Casting engineers need to know where a part solidifies last so they can place feeders and chills before cutting a mould. The physical answer comes from a thermal FEM simulation, which is accurate but slow to set up per part. This model learns that mapping from geometry once and then answers in seconds.
 
----
+> [!NOTE]
+> The whole design is built so the model never sees a filename or a shape label - only the mesh and its cooling boundary. That is what lets a network trained on lab primitives transfer to production castings.
 
-## Project Structure
+## Results
+
+Numbers below are on **held-out geometry families** (whole shape types the model never trained on), which is the honest test of generalization.
+
+| Metric | Physics-feature baseline | **Hybrid GNN (this repo)** |
+|---|---|---|
+| Hot-spot agreement (top-10% overlap) | 0.73 | **0.93** |
+| Mean absolute error | ~9.2 s | **~8.7 s** |
+| Predicted / true field std | collapsed | **~1.0** |
+
+On fully sand-cooled parts (the regime real castings fall into) the hybrid reaches MAE ~5.9 s and 0.94 hot-spot agreement. The earlier plain GNN suffered from *variance collapse*. It smeared the field toward the mean and lost the hot spots entirely. Fixing that was the core of the project (see [How it works](#how-it-works)).
+
+Two real castings, meshed from raw STEP and predicted end to end:
+
+| Part | Nodes | Total solidification time |
+|---|---|---|
+| Ring | 8,478 | 30 s |
+| Wheel | 10,322 | 96 s |
+
+## How it works
+
+The prediction pipeline for a real casting:
+
+```mermaid
+flowchart LR
+  A[STEP file] --> B[gmsh tetra mesh<br/>all surface = cooling]
+  B --> C[9 geometric features<br/>per node]
+  C --> D1[GNN<br/>field shape]
+  C --> D2[HGB baseline<br/>per-graph scale]
+  D1 --> E["Hybrid field<br/>shape × scale"]
+  D2 --> E
+  E --> F[VTU + hot-spot map]
+  F --> G[Web viewer / ParaView]
 ```
-casting-gnn-solidification/
-├── data/                   # Raw .msh and .npz files (9,710 pairs)
-├── step/                   # Procedural CAD generation
-├── data_pyg/               # Processed .pt binary files for PyG
-├── weights/                # Saved model checkpoints
-├── src/                    # Core logic
-│   ├── model.py            # MeshGraphNet architecture
-│   ├── dataset.py          # CastingDataset with SDF calculation
-│   └── train.py            # Delta-learning training loop
-├── 3dgen.py                # Script for generating L, X, T, U-shapes, etc.
-├── meshgen.py              # Gmsh-based tetrahedral mesh generator
-├── convert_to_pyg.py       # Data integration script
-├── main.py                 # Training entry point
-├── visualize.py            # PyVista-based interactive visualizer
-├── environment.yml         # Conda environment configuration
-└── README.md
+
+### Features the model reads
+
+Every node carries **9 features**, all in millimetres and invariant to how the part is positioned or rotated. None of them can be derived from the filename - that constraint is what makes the model transfer.
+
+- `geodesic_d_cool` - distance to the nearest cooling surface, measured *through the metal* (Dijkstra on the mesh), not straight-line
+- `d_surf`, `d_adiab` - distance to the outer surface and to any insulated face
+- `is_cooling`, `is_adiabatic`, `is_interior` - boundary role of the node
+- `volume_mm3`, `surface_area_mm2`, `cooling_area_frac` - local size and how much of the nearby surface actually cools
+
+The target is the physical one: the time each node's temperature crosses the solidus (1120 °C, poured at 1380 °C). The network trains on standardized `log1p` of that time.
+
+### The network
+
+An encode-process-decode **MeshGraphNet** (12 message-passing blocks, hidden width 128) over a k-nearest-neighbour graph (k = 16) built from node positions. Edges carry the relative offset and distance between neighbours, so the same weights apply at any mesh resolution.
+
+<p align="center">
+  <img src="assets/3dforms.png" alt="Training and test geometries" width="720"><br>
+  <em>A slice of the geometry set - plates, wedges, crosses, rings, flanges, a valve tee, a wheel. 42 shape families, 9,710 castings in total.</em>
+</p>
+
+### Shape from the GNN, scale from a baseline
+
+Left alone, the GNN reproduces the *shape* of the solidification field almost perfectly (per-part correlation ~0.98) but drifts on the absolute *level*. A gradient-boosted baseline on the same 9 features gets the per-part magnitude right but has no spatial detail. The hybrid keeps the GNN's deviations from its own mean and re-anchors the level to the baseline:
+
+```
+pred_i = gnn_i - mean(gnn) + mean(baseline)
 ```
 
-## End-to-end pipeline
+That one line keeps the GNN's hot-spot resolution while removing its offset, and it beats both parent models on every split. Code: [`src/hybrid.py`](src/hybrid.py).
 
-1. CAD generation (STEP) -> step/ or exported STEP folder
-2. Tetra meshing (Gmsh: MSH) -> data/.msh
-3. Thermal simulation (ground truth)-> data/.npz
-4. Convert to graph dataset (PyG) -> data_pyg/.pt (+ stats/manifests if enabled)
-5. Train ΔT model (autoregressive) -> weights/.pt (checkpoints)
-6. Inference + visualization -> PyVista viewer / screenshots
+### Boundary conditions
 
-### What files must match
-The pipeline assumes **paired files with identical stems**, e.g.
-- `data/WH_19_45.msh`
-- `data/WH_19_45.npz`
+Each training mesh tags its surfaces as **Cooling** (sand-mould heat loss) or **Adiabatic** (insulated), plus the **Volume**. Adiabatic faces were added on purpose during data generation to force the model to learn from boundary *conditions* rather than from the shape outline. Same reason as everywhere else: transfer to parts it has never seen. Real castings are treated as fully cooled (all outer surface = cooling), which is the regime the hybrid handles best.
 
----
+<p align="center">
+  <img src="assets/mesh.png" alt="Tetrahedral mesh with physical groups in gmsh" width="640"><br>
+  <em>A tetrahedral mesh with its physical groups: Volume, Adiabatic, Cooling.</em>
+</p>
 
-## Data format (raw)
+## The data-recovery story
 
-### Mesh (`.msh`)
-- Tetrahedral volume mesh (Gmsh)
-- Boundary/physical tags are strongly recommended (for boundary condition encoding)
+> [!WARNING]
+> This one nearly sank the project, and it is the most useful thing in the repo for anyone doing FEM-to-ML work.
 
-### Simulation snapshots (`.npz`)
-Expected contents depend on your generator, but typically include:
-- `times`: shape `(T,)`
-- temperature snapshots either on **nodes** and/or **cells**, e.g.:
-  - `snapshots_nodal`: shape `(T, N_nodes)`
-  - `snapshots_cell`:  shape `(T, N_cells)`
+The ground-truth temperatures come out of the FEniCSx/dolfinx solver in **DOF order**, which is scrambled relative to the **gmsh node order** that the mesh and all the geometric features use. About 60% of the per-node targets were silently paired with the wrong node. Every early model looked broken for no visible reason. The correlation between distance-to-cooling and solidification time sat near zero, when physics says it should be strong.
 
-> If your `.npz` keys differ, adjust the mapping in `convert_to_pyg.py` and/or `src/dataset.py`.
+The fix was not to re-run any simulation (the temperatures themselves were correct) but to recover the per-part permutation between DOF order and node order and apply it once during dataset build. After the fix, that correlation jumped to ~0.9 and the models started learning. The recovery scripts live in [`tools/recovery/`](tools/recovery/), and `src/build_dataset.py` applies the saved permutations automatically.
 
----
+## Web viewer
 
-## Model & training concept
+A local single-user app (trame + PyVista) for looking at a prediction:
 
-### Delta-learning (ΔT)
-Instead of predicting absolute temperature directly, the model predicts the increment:
-
-$T_{t+1} = T_t + \Delta T_{\text{pred}}$
-
-This usually stabilizes training and improves rollout behavior.
-
-### MeshGraphNet-style message passing
-- Node features: coordinates, temperature state, optional SDF, boundary markers, etc.
-- Edge features: relative vectors/distances, adjacency info
-- Processor: multiple MP blocks with residual connections
-
-### Autoregressive rollout
-At inference time, the model can roll forward for many steps:
-- either with teacher forcing (during training)
-- or purely autoregressive (during evaluation)
-
----
-
-## Installation
-
-### 1) Create environment
 ```bash
-conda env create -f environment.yml
-conda activate cast_gnn
+python -m src.webapp     # → http://localhost:8080
 ```
 
-### 2) Quick sanity check
+Upload a STEP file and it meshes, predicts, and renders the field. Controls:
+
+- **Time slider** - drag it and frozen regions fade to a ghost while still-liquid metal stays solid, so you watch the front collapse toward the hot spots
+- **Hot-spots toggle** with adjustable size and cutoff
+- **Generate GIF** - records the animation from whatever camera angle you set up (the clip at the top of this page was made this way)
+- A summary panel with total time, hot-spot coordinates, and out-of-distribution warnings when a part is larger than anything in training
+
+## Repository layout
 
 ```
-python -c "import torch; print('torch:', torch.__version__, 'cuda:', torch.cuda.is_available())"
-python -c "import torch_geometric; print('pyg ok')"
+src/
+  step_mesh.py        STEP → gmsh tetrahedral mesh (all-surface cooling)
+  msh_parse.py        read gmsh 2.2 meshes + physical groups
+  geometry.py         geodesic / surface distances, local volume & area
+  features.py         the 9 per-node features (training + inference paths)
+  targets.py          per-node solidus-crossing time
+  build_dataset.py    feature cache (applies node-order recovery)
+  model_gnn.py        MeshGraphNet (encode-process-decode)
+  graph_build.py      kNN graph + edge features
+  train_gnn.py        GNN training
+  baseline.py         gradient-boosted physics baseline
+  hybrid.py           shape × scale combiner
+  ood.py              out-of-distribution size check
+  predict_casting.py  end-to-end: STEP → prediction → VTU + summary
+  viz.py / webapp.py  PyVista helpers + the trame web app
+tools/recovery/       dolfinx DOF ↔ gmsh node-order recovery (run once)
+tests/                70 tests
 ```
-## Quickstart (recommended)
 
-> The commands below show the intended flow.  
-> **Important:** key generation/meshing settings are defined **at the top of the scripts**:
-> - `3dgen.py`: main parameters for **3D model generation** (geometry variants, sizes/ranges, counts, seeds, etc.)
-> - `meshgen.py`: selection of **adiabatic surfaces** (by labels/rules) and the **number of CPU cores** used for meshing
+## Getting started
 
-### A) If you already have raw data (`data/*.msh` + `data/*.npz`)
+The project runs in a conda environment with PyTorch 2.3 + PyTorch Geometric, plus gmsh, meshio, and the PyVista/trame viewer stack.
 
-1) Convert raw pairs into PyG graphs:
+```bash
+conda create -n casting-gnn python=3.11
+conda activate casting-gnn
+pip install -r requirements.txt
+```
 
-    python convert_to_pyg.py --help
-    python convert_to_pyg.py \
-      --data_dir data \
-      --out_dir data_pyg
+Node-order recovery (only needed if you rebuild the dataset from raw simulations) uses a separate environment with dolfinx 0.11.
 
-2) Train:
+> [!IMPORTANT]
+> Running the models needs the trained artifacts (GNN checkpoint, baseline, normalization stats). They are not in the repo because they are large and regenerable. The code paths and shapes are all here to read and to retrain from your own simulation data.
 
-    python main.py --help
-    python main.py \
-      --data_dir data_pyg \
-      --out_dir weights \
-      --device cuda
+## Predict on a real casting
 
-3) Visualize a sample prediction:
+```bash
+python -m src.predict_casting /path/to/part.step --out-dir runs/castings
+```
 
-    python visualize.py --help
-    python visualize.py \
-      --pt data_pyg/<sample>.pt \
-      --ckpt weights/<checkpoint>.pt \
-      --device cuda
+This writes `part.vtu` (open in ParaView; point fields `solidification_time` and `hotspot`) and `part_summary.txt` (total time, hot-spot coordinates, any size warnings). All outer surface is treated as sand-mould cooling.
 
-### B) Full generation (CAD → mesh → simulate → train)
+## Rebuild the dataset / retrain
 
-#### 1) Generate CAD (procedural 3D forms)
+```bash
+# 1) node-order recovery perms (dolfinx env, one time)
+python tools/recovery/compute_perms.py
 
-**Main generation settings are defined at the top of `3dgen.py`.**  
-Below is a visual overview of the primary procedural forms:
+# 2) feature cache
+python -m src.build_dataset --workers 12 --out-dir data/features_v2
 
-![Procedural 3D forms](3dforms.png)
+# 3) baseline, then GNN
+python -c "from src.run_baseline import run; run(features_dir='data/features_v2', out_dir='runs/baseline_v2')"
+python -c "from src.train_gnn import train; train(n_blocks=12, batch_size=2)"
+```
 
-Run:
+## Tests
 
-    python 3dgen.py --help
-    python 3dgen.py --out_dir step/generated --n 50 --seed 42
+```bash
+pytest -q     # 70 tests
+```
 
-#### 2) Generate tetra meshes (Gmsh) + adiabatic markers
+They cover the geometry math, feature construction, the node-order recovery invariant, the model forward pass, the hybrid, the inference driver, and the viewer helpers.
 
-**Adiabatic surface selection rules and CPU core count are defined at the top of `meshgen.py`.**  
-Example of highlighted adiabatic surfaces:
+## Status
 
-![Adiabatic surface example](mesh.png)
+The end-to-end pipeline works: FEM ground truth → recovered dataset → baseline + GNN → hybrid → real STEP inference → web viewer. Quantitative validation against a fresh FEniCSx run on real parts is the next step. Multi-body STEP assemblies are lumped into a single solid for now, which suits single-piece castings.
 
-Run:
-
-    python meshgen.py --help
-    python meshgen.py --in_dir step/generated --out_dir data --mesh_size 6.0
-
-#### 3) Produce `.npz` via your thermal solver (external or integrated in your workflow)
-
-- Place results into `data/` using the same stem as the mesh.
-
-#### 4) Continue with conversion + training as in (A)
-
----
-
-## Script reference (I/O contract)
-
-| Script | Purpose | Typical input | Typical output |
-|---|---|---|---|
-| `3dgen.py` | procedural geometry | params/seed | STEP files / geometry assets |
-| `meshgen.py` | tetra meshing + markers | STEP | `.msh` in `data/` |
-| *(solver)* | thermal ground truth | `.msh` | `.npz` in `data/` |
-| `convert_to_pyg.py` | raw → PyG | `.msh` + `.npz` | `.pt` in `data_pyg/` |
-| `main.py` | training entry point | `data_pyg/*.pt` | checkpoints in `weights/` |
-| `visualize.py` | inspect mesh / rollout | `.pt` + checkpoint | interactive view / screenshots |
-
----
-
-## Practical notes (GPU / performance)
-
-- Autoregressive rollout can be numerically sensitive; start with:
-  - shorter horizons,
-  - teacher forcing during training,
-  - stable normalization (ΔT stats).
-- Conversion can be heavy for large meshes; consider batching and caching in `data_pyg/`.
-- If you see “blobby spheres / artifacts” in visualization, check:
-  - cell vs nodal field mapping,
-  - unit/scale consistency (coords normalization),
-  - correct association of temperature snapshots to mesh entities.
-
----
-
-## Troubleshooting
-
-- **No matching pairs found**  
-  Ensure `data/*.msh` and `data/*.npz` share the same filename stem.
-
-- **PyG / CUDA issues**  
-  Your `torch` / `torch-geometric` wheels must match CUDA version. Rebuild the conda env if needed.
-
-- **Visualizer shows weird inclusions or discontinuities**  
-  Validate:
-  1) `snapshots_nodal` length equals number of mesh nodes (if nodal),
-  2) indexing order in `.msh` vs the array order in `.npz`,
-  3) whether you visualize cell-scalars as point-scalars or vice versa.
-
----
-
-## Roadmap (near-term)
-
-- [ ] Single unified CLI (one entrypoint for generate → mesh → convert → train → viz)
-- [ ] Formal dataset manifest + train/val/test splits
-- [ ] Better boundary encoding (multi-class physical groups)
-- [ ] Robust normalization for long rollouts (ΔT stats, optional log scaling)
-- [ ] Quantitative metrics: rollout error vs horizon, hotspot localization score
-
-## Hardware Requirements
-
-To achieve efficient training and real-time visualization of the deep MeshGraphNet architecture, the following hardware specifications are recommended:
-
-* **Graphics Processing Unit (GPU):** A dedicated NVIDIA GPU with CUDA support is mandatory for deep message passing and gradient calculations.
-* **Video RAM (VRAM):** At least 8GB to 12GB of VRAM (e.g., NVIDIA RTX 3060 12GB) is required to handle the memory overhead of 12-15 processor layers when operating on complex tetrahedral meshes.
-* **System Memory (RAM):** A minimum of 16GB-32GB of RAM is recommended to ensure smooth data conversion and mesh processing via `Meshio` and `CadQuery`.
-* **Storage Capacity:** Approximately 150GB-200GB of free disk space is required to store the 9,710 raw simulation pairs (`.msh` and `.npz`) along with the processed PyTorch Geometric datasets.
-
-> **Note:** While the model can run on a CPU for inference (prediction), training is not feasible on a CPU due to the iterative nature of the Delta-Prediction logic and the depth of the graph processor.
+Trained on a Xeon workstation with one RTX 3060 (12 GB); a full prediction on a real part takes seconds to a couple of minutes.
