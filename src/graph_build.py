@@ -29,3 +29,24 @@ def random_rotation_matrix(seed: int | None = None) -> torch.Tensor:
 
 def rotate(pos: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
     return pos @ R.to(pos.device, pos.dtype).t()
+
+
+def union_edge_index(pos: torch.Tensor, mesh_edges: torch.Tensor, k: int = 16):
+    """Undirected union of tet-mesh edges and kNN edges, deduplicated.
+
+    mesh_edges: (M,2) long tensor of unique node pairs (any orientation).
+    Returns (edge_index (2,E) long, is_mesh (E,) float32 flag)."""
+    n = pos.shape[0]
+    knn = knn_edge_index(pos, k=k).to(torch.long)
+    me = mesh_edges.t().to(torch.long)
+    me = torch.cat([me, me.flip(0)], dim=1)                    # both directions
+    mesh_key = me[0] * n + me[1]
+    keys = torch.unique(torch.cat([mesh_key, knn[0] * n + knn[1]]))
+    ei = torch.stack([keys // n, keys % n])
+    is_mesh = torch.isin(keys, mesh_key).to(torch.float32)
+    return ei, is_mesh
+
+
+def union_edge_attr(pos: torch.Tensor, edge_index: torch.Tensor,
+                    is_mesh: torch.Tensor) -> torch.Tensor:
+    return torch.cat([edge_attr(pos, edge_index), is_mesh.unsqueeze(1)], dim=1)  # (E,5)

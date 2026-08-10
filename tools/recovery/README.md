@@ -1,8 +1,12 @@
 # Node-ordering recovery (Phase 0, Task 0)
 
 Raw `snapshots_nodal`/`temps` are in dolfinx DOF order, scrambled vs gmsh node
-order (see docs spec §1.5). These scripts reconstruct the per-mesh DOF->gmsh
+order. These scripts reconstruct the per-mesh DOF->gmsh
 permutation via dolfinx and validate physically. Run in the `fenicsx` env.
+
+Paths default to the repository's `data/` and `runs/` directories and can be
+overridden with the `RECOVERY_*` environment variables defined at the top of
+each script.
 
 1. `compute_perms.py` — all stems, coord-hash match -> data/features/perms/<stem>.npy
    + runs/recovery_report.csv

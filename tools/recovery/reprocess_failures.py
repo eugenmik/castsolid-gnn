@@ -1,7 +1,7 @@
 """Re-process no_bijection stems with KDTree nearest matching (robust to the
 float noise from the XDMF roundtrip). Greedy top-k assignment guarantees a
 bijection for near-identical point sets. Updates perms + a second report."""
-import os, glob, csv, warnings
+import os, glob, csv, warnings, tempfile
 import numpy as np
 warnings.filterwarnings("ignore")
 from mpi4py import MPI
@@ -9,12 +9,12 @@ from dolfinx import io, fem
 import meshio
 from scipy.spatial import cKDTree
 
-MSHROOT="/home/eugen/Foundry_GNN/data"
-RAW="/home/eugen/Media/MIGRATION/Debian/casting_gnn/data/raw"
-OUT="/home/eugen/Foundry_GNN/data/features/perms"
-REPORT="/home/eugen/Foundry_GNN/runs/recovery_report.csv"
-OUT2="/home/eugen/Foundry_GNN/runs/recovery_report_fix.csv"
-TMP=f"/home/eugen/.claude/jobs/430075b7/tmp/_fix_{os.getpid()}.xdmf"
+MSHROOT=os.environ.get("RECOVERY_MESH_ROOT", "data")
+RAW=os.environ.get("RECOVERY_RAW", "data/raw")
+OUT=os.environ.get("RECOVERY_OUT", "data/features_v2/perms")
+REPORT=os.environ.get("RECOVERY_REPORT", "runs/recovery_report.csv")
+OUT2=os.environ.get("RECOVERY_FIX_REPORT", "runs/recovery_report_fix.csv")
+TMP=os.path.join(tempfile.gettempdir(), f"recovery_fix_{os.getpid()}.xdmf")
 T_SOL=1120.0
 
 def find_msh(s):

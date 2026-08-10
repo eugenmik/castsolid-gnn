@@ -1,5 +1,7 @@
-# Raw and derived data (large — never commit: ~66 GB)
-data/
+# Raw and derived data are large. Keep only the small public property tables.
+data/*
+!data/properties/
+!data/properties/*.csv
 # Training artifacts, checkpoints, logs
 runs/
 # Model checkpoints anywhere

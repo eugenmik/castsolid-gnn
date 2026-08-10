@@ -1,0 +1,9 @@
+name,source,type,MEF,mef_source
+SYNTH_EXO_140,synthetic,exo,1.40,synthetic_example
+SYNTH_EXO_165,synthetic,exo,1.65,synthetic_example
+SYNTH_INSULATING_115,synthetic,insulating,1.15,synthetic_example
+SD_4_7K,catalog,exo,1.547,catalog_ratio
+SD_4_95K,catalog,exo,1.562,catalog_ratio
+SD_5_8K,catalog,exo,1.579,catalog_ratio
+FOSECO_V90L,catalog,insulating,1.15,public_catalog_example
+FOSECO_V88E,catalog,insulating,1.45,public_catalog_example

@@ -1,0 +1,5 @@
+material,k_W_mK,rho_kg_m3,cp_J_kgK,effusivity_W_s05_m2K
+graphite,68.97,1922,1692,14978
+cast_iron,38.9,7150,515,11968
+steel,51.0,7860,486,13958
+copper,OWNER,OWNER,OWNER,OWNER

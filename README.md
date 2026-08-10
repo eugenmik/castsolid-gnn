@@ -1,184 +1,180 @@
 # Casting Solidification GNN
 
-A graph neural network that predicts, for a metal casting, **how long every point takes to solidify** and **where the last-to-freeze hot spots are** - the zones that shrink and form porosity. It works directly on a real casting's STEP file and generalizes from 42 simple training shapes to parts it has never seen.
+A graph neural network surrogate for **rapid solidification screening** of metal castings.
+Given a STEP model, alloy and mold condition, the pipeline predicts a per-node
+solidification-time field and identifies the last-to-solidify regions.
+
+It is designed to provide an early engineering estimate before a full simulation study.
+It is **not** a replacement for a calibrated process simulation or physical validation.
+Hot spots are indicators of feeding difficulty and shrinkage risk; they are not direct
+porosity labels.
 
 <p align="center">
-  <img src="assets/solidification.gif" alt="Solidification playback in the web viewer" width="640"><br>
-  <em>The web viewer replaying a predicted solidification front: already-frozen material fades to a ghost, still-liquid metal stays opaque, and the last pocket to solidify is the hot spot.</em>
+  <img src="assets/solidification.gif" alt="Predicted solidification playback" width="720"><br>
+  <em>Predicted solidification playback: already-solidified material becomes translucent while the remaining liquid region contracts toward the hot spot.</em>
 </p>
 
-Casting engineers need to know where a part solidifies last so they can place feeders and chills before cutting a mould. The physical answer comes from a thermal FEM simulation, which is accurate but slow to set up per part. This model learns that mapping from geometry once and then answers in seconds.
+## Current status
 
-> [!NOTE]
-> The whole design is built so the model never sees a filename or a shape label - only the mesh and its cooling boundary. That is what lets a network trained on lab primitives transfer to production castings.
+- Production model stack: **v5.1 hybrid**, frozen July 31, 2026.
+- Inputs: STEP geometry in millimeters, named alloy and mold properties, and optional
+  casting/chill/sleeve body roles.
+- Outputs: per-node solidification time, total time, top-decile hot-spot mask, OOD warnings
+  and a scoped shrinkage-screening layer.
+- Browser workflow: **FoundryFlash**, a working prelaunch prototype for upload, meshing and
+  interactive 3D review. It is not publicly deployed.
+- Intended positioning: **rapid solidification screening** only.
 
-## Results
+## Evidence, separated by evaluation regime
 
-Numbers below are on **held-out geometry families** (whole shape types the model never trained on), which is the honest test of generalization.
+Results from different datasets are not interchangeable. The small primitive regime and the
+later real-geometry evaluation have very different time scales.
 
-| Metric | Physics-feature baseline | **Hybrid GNN (this repo)** |
-|---|---|---|
-| Hot-spot agreement (top-10% overlap) | 0.73 | **0.93** |
-| Mean absolute error | ~9.2 s | **~8.7 s** |
-| Predicted / true field std | collapsed | **~1.0** |
+| Evaluation | n | Nodal MAE | Hot-spot overlap | What it establishes |
+|---|---:|---:|---:|---|
+| Held-out primitive geometry families | family split | **4.26 s** | **0.917** | Generalization across unseen synthetic shape families in the original regime |
+| Unseen real, single-body casting geometry | 6 | **80.3 s median** | **0.738 median** | Geometry generalization against a shared-mesh FEniCSx reference |
+| Unseen real sleeve assemblies | 2 | **443.7 s median** | **0.932 median** | Good hot-region ranking, but excessive field smoothing and poor absolute calibration |
 
-On fully sand-cooled parts (the regime real castings fall into) the hybrid reaches MAE ~5.9 s and 0.94 hot-spot agreement. The earlier plain GNN suffered from *variance collapse*. It smeared the field toward the mean and lost the hot spots entirely. Fixing that was the core of the project (see [How it works](#how-it-works)).
+The real-geometry study started with 10 production casting CAD models. Two could not be
+meshed because of self-intersecting B-reps, leaving eight scored parts. One single-body part
+had only **0.035** hot-spot overlap, so the median must not be read as a guarantee.
 
-Two real castings, meshed from raw STEP and predicted end to end:
+> [!IMPORTANT]
+> Training and real-geometry reference fields share the same FEniCSx heat-transfer model,
+> material database and boundary assumptions. These results measure surrogate generalization
+> to new geometry. They do **not** establish physical accuracy against instrumented castings.
 
-| Part | Nodes | Total solidification time |
-|---|---|---|
-| Ring | 8,478 | 30 s |
-| Wheel | 10,322 | 96 s |
+Hot-spot overlap is the overlap of the predicted and reference top 10% latest-solidifying
+nodes. A value of 1.0 means the two node sets coincide.
 
-## How it works
-
-The prediction pipeline for a real casting:
+## How v5.1 works
 
 ```mermaid
 flowchart LR
-  A[STEP file] --> B[gmsh tetra mesh<br/>all surface = cooling]
-  B --> C[9 geometric features<br/>per node]
-  C --> D1[GNN<br/>field shape]
-  C --> D2[HGB baseline<br/>per-graph scale]
-  D1 --> E["Hybrid field<br/>shape × scale"]
+  A[STEP + process inputs] --> B[CAD healing + tetrahedral mesh]
+  B --> C[15 node features + alloy/BC vector]
+  C --> D1[12-block GNN<br/>field pattern]
+  C --> D2[GBM total head<br/>absolute scale]
+  C --> D3[GBM spread head<br/>field contrast]
+  D1 --> E[Soft-anchor recomposition]
   D2 --> E
-  E --> F[VTU + hot-spot map]
-  F --> G[Web viewer / ParaView]
+  D3 --> E
+  E --> F[Time field + hot spots + OOD]
+  F --> G[VTU / browser viewer]
 ```
 
-### Features the model reads
+The graph network follows the encode-process-decode pattern introduced by
+[MeshGraphNets](https://arxiv.org/abs/2010.03409). Mesh edges and nearby-node connections
+form a union graph. Twelve message-passing blocks with hidden width 128 predict the spatial
+field pattern.
 
-Every node carries **9 features**, all in millimetres and invariant to how the part is positioned or rotated. None of them can be derived from the filename - that constraint is what makes the model transfer.
+The graph network alone is not the production predictor. Two
+`HistGradientBoostingRegressor` heads estimate total solidification time and field spread.
+`src/hybrid.py::hybrid_field_soft` maps the GNN field to those two graph-level targets while
+clipping negative time. The production weights are `w_total=1.0` and `w_std=4.0`.
 
-- `geodesic_d_cool` - distance to the nearest cooling surface, measured *through the metal* (Dijkstra on the mesh), not straight-line
-- `d_surf`, `d_adiab` - distance to the outer surface and to any insulated face
-- `is_cooling`, `is_adiabatic`, `is_interior` - boundary role of the node
-- `volume_mm3`, `surface_area_mm2`, `cooling_area_frac` - local size and how much of the nearby surface actually cools
+### Features and conditioning
 
-The target is the physical one: the time each node's temperature crosses the solidus (1120 °C, poured at 1380 °C). The network trains on standardized `log1p` of that time.
+The v5.1 checkpoint consumes 15 per-node features:
 
-### The network
+- distance through the mesh to cooling and adiabatic boundaries;
+- surface, interior, cooling and adiabatic flags;
+- global volume, surface area and cooling-area fraction;
+- local volume-to-surface measures at 5, 15 and 40 mm radii;
+- boundary-extraction and exothermic-influence channels.
 
-An encode-process-decode **MeshGraphNet** (12 message-passing blocks, hidden width 128) over a k-nearest-neighbour graph (k = 16) built from node positions. Edges carry the relative offset and distance between neighbours, so the same weights apply at any mesh resolution.
+A five-value graph vector conditions the network on alloy and boundary properties through
+FiLM layers. The public tables contain 12 named iron and steel grades, two mold labels and
+example chill/sleeve inputs. The two mold rows currently share the same interim thermal
+properties; selecting between them does not yet change a prediction.
 
-<p align="center">
-  <img src="assets/3dforms.png" alt="Training and test geometries" width="720"><br>
-  <em>A slice of the geometry set - plates, wedges, crosses, rings, flanges, a valve tee, a wheel. 42 shape families, 9,710 castings in total.</em>
-</p>
+## Data
 
-### Shape from the GNN, scale from a baseline
+Development began with **9,710** thermal simulations across **42** geometry families. A
+later **4,727-case** dataset expanded the problem to multiple alloys and boundary-condition
+regimes, including sand cooling, chills and sleeves. Reference fields were generated with
+[FEniCSx](https://fenicsproject.org/) using an enthalpy-based conduction model with latent
+heat.
 
-Left alone, the GNN reproduces the *shape* of the solidification field almost perfectly (per-part correlation ~0.98) but drifts on the absolute *level*. A gradient-boosted baseline on the same 9 features gets the per-part magnitude right but has no spatial detail. The hybrid keeps the GNN's deviations from its own mean and re-anchors the level to the baseline:
+The repository does not include the raw simulation corpus or trained weights. The public
+source is a curated implementation snapshot for technical review; inference requires the
+matching private model package.
 
-```
-pred_i = gnn_i - mean(gnn) + mean(baseline)
-```
+## The data-recovery lesson
 
-That one line keeps the GNN's hot-spot resolution while removing its offset, and it beats both parent models on every split. Code: [`src/hybrid.py`](src/hybrid.py).
+The most consequential defect was not in the neural network. Solver temperatures were in
+degree-of-freedom order, while coordinates and geometric features were in gmsh node order.
+About 60% of nodal targets were silently attached to the wrong positions.
 
-### Boundary conditions
+The recovery scripts in [`tools/recovery/`](tools/recovery/) reconstruct the permutation
+between those orderings, and `src/build_dataset.py` applies it while building graph data.
+For simulation-to-ML work, this is the key lesson: verify local data identity across every
+solver/mesh interface before tuning a model.
 
-Each training mesh tags its surfaces as **Cooling** (sand-mould heat loss) or **Adiabatic** (insulated), plus the **Volume**. Adiabatic faces were added on purpose during data generation to force the model to learn from boundary *conditions* rather than from the shape outline. Same reason as everywhere else: transfer to parts it has never seen. Real castings are treated as fully cooled (all outer surface = cooling), which is the regime the hybrid handles best.
+## Repository map
 
-<p align="center">
-  <img src="assets/mesh.png" alt="Tetrahedral mesh with physical groups in gmsh" width="640"><br>
-  <em>A tetrahedral mesh with its physical groups: Volume, Adiabatic, Cooling.</em>
-</p>
-
-## The data-recovery story
-
-> [!WARNING]
-> This one nearly sank the project, and it is the most useful thing in the repo for anyone doing FEM-to-ML work.
-
-The ground-truth temperatures come out of the FEniCSx/dolfinx solver in **DOF order**, which is scrambled relative to the **gmsh node order** that the mesh and all the geometric features use. About 60% of the per-node targets were silently paired with the wrong node. Every early model looked broken for no visible reason. The correlation between distance-to-cooling and solidification time sat near zero, when physics says it should be strong.
-
-The fix was not to re-run any simulation (the temperatures themselves were correct) but to recover the per-part permutation between DOF order and node order and apply it once during dataset build. After the fix, that correlation jumped to ~0.9 and the models started learning. The recovery scripts live in [`tools/recovery/`](tools/recovery/), and `src/build_dataset.py` applies the saved permutations automatically.
-
-## Web viewer
-
-A local single-user app (trame + PyVista) for looking at a prediction:
-
-```bash
-python -m src.webapp     # → http://localhost:8080
-```
-
-Upload a STEP file and it meshes, predicts, and renders the field. Controls:
-
-- **Time slider** - drag it and frozen regions fade to a ghost while still-liquid metal stays solid, so you watch the front collapse toward the hot spots
-- **Hot-spots toggle** with adjustable size and cutoff
-- **Generate GIF** - records the animation from whatever camera angle you set up (the clip at the top of this page was made this way)
-- A summary panel with total time, hot-spot coordinates, and out-of-distribution warnings when a part is larger than anything in training
-
-## Repository layout
-
-```
+```text
 src/
-  step_mesh.py        STEP → gmsh tetrahedral mesh (all-surface cooling)
-  msh_parse.py        read gmsh 2.2 meshes + physical groups
-  geometry.py         geodesic / surface distances, local volume & area
-  features.py         the 9 per-node features (training + inference paths)
-  targets.py          per-node solidus-crossing time
-  build_dataset.py    feature cache (applies node-order recovery)
-  model_gnn.py        MeshGraphNet (encode-process-decode)
-  graph_build.py      kNN graph + edge features
-  train_gnn.py        GNN training
-  baseline.py         gradient-boosted physics baseline
-  hybrid.py           shape × scale combiner
-  ood.py              out-of-distribution size check
-  predict_casting.py  end-to-end: STEP → prediction → VTU + summary
-  viz.py / webapp.py  PyVista helpers + the trame web app
-tools/recovery/       dolfinx DOF ↔ gmsh node-order recovery (run once)
-tests/                70 tests
+  model_gnn.py          GNN, FiLM and optional derivative heads
+  features.py           v2-v5 geometry and boundary features
+  hybrid.py             scale/spread recomposition
+  predict_casting.py    STEP-to-field orchestration
+  assembly.py           multi-body roles and contact patches
+  shrinkage.py          scoped post-processing and confidence flags
+  mesh_cache.py         content-addressed meshing cache
+  train_*.py            training and fine-tuning entry points
+tools/
+  recovery/             solver-DOF to mesh-node recovery
+  doe/                   public property and density-meshing helpers
+data/properties/         compact public material/BC tables
+tests/                   deterministic public unit tests
 ```
 
-## Getting started
+## Installation
 
-The project runs in a conda environment with PyTorch 2.3 + PyTorch Geometric, plus gmsh, meshio, and the PyVista/trame viewer stack.
+Create a Python 3.11 environment, install a PyTorch build suitable for your CPU/CUDA setup,
+then install the remaining dependencies:
 
 ```bash
-conda create -n casting-gnn python=3.11
-conda activate casting-gnn
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Node-order recovery (only needed if you rebuild the dataset from raw simulations) uses a separate environment with dolfinx 0.11.
-
-> [!IMPORTANT]
-> Running the models needs the trained artifacts (GNN checkpoint, baseline, normalization stats). They are not in the repo because they are large and regenerable. The code paths and shapes are all here to read and to retrain from your own simulation data.
-
-## Predict on a real casting
+Run the public tests:
 
 ```bash
-python -m src.predict_casting /path/to/part.step --out-dir runs/castings
+pytest -q
 ```
 
-This writes `part.vtu` (open in ParaView; point fields `solidification_time` and `hotspot`) and `part_summary.txt` (total time, hot-spot coordinates, any size warnings). All outer surface is treated as sand-mould cooling.
+Current public snapshot: **306 passed, 7 skipped**. The skipped cases require optional
+runtime capabilities unavailable in the basic test environment.
 
-## Rebuild the dataset / retrain
+The committed source paths expect the following private artifacts for v5.1 inference:
 
-```bash
-# 1) node-order recovery perms (dolfinx env, one time)
-python tools/recovery/compute_perms.py
-
-# 2) feature cache
-python -m src.build_dataset --workers 12 --out-dir data/features_v2
-
-# 3) baseline, then GNN
-python -c "from src.run_baseline import run; run(features_dir='data/features_v2', out_dir='runs/baseline_v2')"
-python -c "from src.train_gnn import train; train(n_blocks=12, batch_size=2)"
+```text
+runs/ft3_stage1/ckpt_ep021.pt
+runs/ft3_gbm/hgb_v3.joblib
+runs/ft3_gbm/hgb_std_v2.joblib
+data/features_v2/ood_ranges.json
 ```
 
-## Tests
+They are intentionally excluded from this public repository. See [`MODEL_CARD.md`](MODEL_CARD.md)
+for the evaluation scope and operating limits.
 
-```bash
-pytest -q     # 70 tests
-```
+## Practical limits
 
-They cover the geometry math, feature construction, the node-order recovery invariant, the model forward pass, the hybrid, the inference driver, and the viewer helpers.
+- Pure conduction with latent heat: no mold filling, fluid flow, gas, stress or distortion.
+- CAD healing and tetrahedral meshing dominate end-to-end latency and may fail on invalid
+  solids. GNN inference itself takes seconds after meshing on the development GPU.
+- OOD checks cover geometry size and distance to cooling, but are not a calibrated uncertainty
+  estimate.
+- Assemblies may locate hot regions well while underestimating field contrast.
+- The Niyama-style proxy is marked low-confidence for chill-bearing inputs.
+- Physical validation against measured castings is the next launch-critical study.
 
-## Status
+## Author
 
-The end-to-end pipeline works: FEM ground truth → recovered dataset → baseline + GNN → hybrid → real STEP inference → web viewer. Quantitative validation against a fresh FEniCSx run on real parts is the next step. Multi-body STEP assemblies are lumped into a single solid for now, which suits single-piece castings.
-
-Trained on a Xeon workstation with one RTX 3060 (12 GB); a full prediction on a real part takes seconds to a couple of minutes.
+**Eugen Miknevic** — independent foundry engineer<br>
+Contact: **eugenmiknevic@gmail.com**

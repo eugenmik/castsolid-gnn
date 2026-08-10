@@ -4,19 +4,19 @@ perm per stem + a CSV report. Run in the fenicsx env.
 
 perm g: temps_gmsh[:, g] = temps_dof  (g[dof] = gmsh_node_index)
 """
-import os, glob, warnings, csv, sys
+import os, glob, warnings, csv, sys, tempfile
 import numpy as np
 warnings.filterwarnings("ignore")
 from mpi4py import MPI
 from dolfinx import io, fem
 import meshio
 
-RAW="/home/eugen/Media/MIGRATION/Debian/casting_gnn/data/raw"
-MSHROOT="/home/eugen/Foundry_GNN/data"
-PTDIR="/home/eugen/Foundry_GNN/data/pt"
-OUT="/home/eugen/Foundry_GNN/data/features/perms"
-REPORT="/home/eugen/Foundry_GNN/runs/recovery_report.csv"
-TMP=f"/home/eugen/.claude/jobs/430075b7/tmp/_perm_{os.getpid()}.xdmf"
+RAW=os.environ.get("RECOVERY_RAW", "data/raw")
+MSHROOT=os.environ.get("RECOVERY_MESH_ROOT", "data")
+PTDIR=os.environ.get("RECOVERY_PT_DIR", "data/pt")
+OUT=os.environ.get("RECOVERY_OUT", "data/features_v2/perms")
+REPORT=os.environ.get("RECOVERY_REPORT", "runs/recovery_report.csv")
+TMP=os.path.join(tempfile.gettempdir(), f"recovery_perm_{os.getpid()}.xdmf")
 T_SOL=1120.0
 os.makedirs(OUT, exist_ok=True)
 
