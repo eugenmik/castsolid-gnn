@@ -1,29 +1,25 @@
-"""MeshGraphNet-style encode-process-decode GNN predicting standardized
-log1p(solidification_time) per node; global scalar = max over nodes."""
+"""The graph network: an encode-process-decode GNN in the style of
+MeshGraphNets, conditioned on the alloy/mold vector through FiLM.
+
+It predicts the standardized log1p solidification time of every node. The
+graph is the union of the tetrahedral mesh edges and each node's k nearest
+neighbours; an edge carries its displacement vector (mm), its length and a
+flag telling whether it is a mesh edge.
+"""
+import numpy as np
 import torch
 import torch.nn as nn
-from torch_geometric.utils import scatter
+from torch_geometric.nn import knn_graph
+from torch_geometric.utils import scatter, to_undirected
 
 
 def _mlp(i, h, o):
     return nn.Sequential(nn.Linear(i, h), nn.ReLU(), nn.Linear(h, o))
 
 
-def zero_init_input_columns(model, n_new):
-    """Zero the trailing n_new weight columns of the first Linear layer in node_encoder.
-
-    This is used when extending the input dim (e.g., 13 → 15 for new BC channels)
-    to ensure new columns start at zero and contribute nothing at initialization.
-
-    Args:
-        model: SolidGNN instance
-        n_new: Number of trailing columns to zero in the first Linear weight matrix
-    """
-    with torch.no_grad():
-        model.node_encoder[0][0].weight[:, -n_new:] = 0
-
-
 class ProcessorBlock(nn.Module):
+    """One message-passing step with residual edge and node updates."""
+
     def __init__(self, h):
         super().__init__()
         self.edge_mlp = _mlp(3 * h, h, h)
@@ -40,12 +36,12 @@ class ProcessorBlock(nn.Module):
 
 
 class FiLM(nn.Module):
-    """g -> (gamma, beta) per hidden channel; zero-init => gamma=0,beta=0 => identity."""
+    """g -> per-channel (gamma, beta); applied as h * (1 + gamma) + beta."""
+
     def __init__(self, g_dim, hidden):
         super().__init__()
         self.net = nn.Sequential(nn.Linear(g_dim, hidden), nn.SiLU(),
-                                  nn.Linear(hidden, 2 * hidden))
-        nn.init.zeros_(self.net[-1].weight); nn.init.zeros_(self.net[-1].bias)
+                                 nn.Linear(hidden, 2 * hidden))
 
     def forward(self, h, g_nodes):
         gamma, beta = self.net(g_nodes).chunk(2, dim=-1)
@@ -53,84 +49,88 @@ class FiLM(nn.Module):
 
 
 class SolidGNN(nn.Module):
-    def __init__(self, node_in=9, edge_in=4, hidden=128, n_blocks=12, two_head=False,
-                 film=False, g_dim=5, deriv_heads=False):
+    """12 processor blocks (hidden width 128 in the published model), FiLM
+    after each block, and a two-head decoder: a per-node deviation head and
+    a graph-level scale head on the mean node embedding."""
+
+    def __init__(self, node_in=15, edge_in=5, hidden=128, n_blocks=12, g_dim=5):
         super().__init__()
         self.node_encoder = nn.Sequential(_mlp(node_in, hidden, hidden), nn.LayerNorm(hidden))
         self.edge_encoder = nn.Sequential(_mlp(edge_in, hidden, hidden), nn.LayerNorm(hidden))
         self.blocks = nn.ModuleList([ProcessorBlock(hidden) for _ in range(n_blocks)])
         self.decoder = _mlp(hidden, hidden // 2, 1)
-        self.two_head = two_head
-        if two_head:
-            self.scale_head = _mlp(hidden, hidden // 2, 1)
-        self.film = film
-        self.films = nn.ModuleList([FiLM(g_dim, hidden) for _ in range(n_blocks)]) if film else None
-        self.deriv_heads = deriv_heads
-        if deriv_heads:
-            # Optional gradT/dTdt output heads. They hang off the SAME final
-            # hidden state h that the decoder consumes (after the FiLM/blocks
-            # loop, before the two_head mean/scale recomposition) -- they read
-            # h but never modify it, so the frozen y_nodal/y_global path below
-            # is unaffected by their presence.
-            self.grad_head = _mlp(hidden, hidden // 2, 1)
-            self.dtdt_head = _mlp(hidden, hidden // 2, 1)
+        self.scale_head = _mlp(hidden, hidden // 2, 1)
+        self.films = nn.ModuleList([FiLM(g_dim, hidden) for _ in range(n_blocks)])
 
-    def forward(self, x, edge_index, edge_attr, batch, g=None):
+    def forward(self, x, edge_index, edge_attr, batch, g):
         h = self.node_encoder(x)
         e = self.edge_encoder(edge_attr)
-        g_nodes = g[batch] if (self.film and g is not None) else None
+        g_nodes = g[batch]
         for i, blk in enumerate(self.blocks):
             h, e = blk(h, edge_index, e)
-            if g_nodes is not None:
-                h = self.films[i](h, g_nodes)
-        if self.deriv_heads:
-            deriv = torch.cat([self.grad_head(h), self.dtdt_head(h)], dim=-1)
+            h = self.films[i](h, g_nodes)
         y_nodal = self.decoder(h).squeeze(-1)
-        if self.two_head:
-            dev = y_nodal - scatter(y_nodal, batch, dim=0, reduce="mean")[batch]
-            scale = self.scale_head(scatter(h, batch, dim=0, reduce="mean")).squeeze(-1)
-            y_nodal = dev + scale[batch]
-        y_global = scatter(y_nodal, batch, dim=0, reduce="max")
-        if self.deriv_heads:
-            return y_nodal, y_global, deriv
-        return y_nodal, y_global
+        dev = y_nodal - scatter(y_nodal, batch, dim=0, reduce="mean")[batch]
+        scale = self.scale_head(scatter(h, batch, dim=0, reduce="mean")).squeeze(-1)
+        return dev + scale[batch]
 
 
-def attach_deriv_heads(model, state_dict):
-    """Load a (possibly headless) state_dict into a `deriv_heads=True` model
-    via `load_state_dict(strict=False)`, asserting the ONLY missing keys are
-    the two new heads' parameters (`grad_head.*` / `dtdt_head.*`).
+def knn_edge_index(pos: torch.Tensor, k: int = 16) -> torch.Tensor:
+    ei = knn_graph(pos, k=k, loop=False)      # directed k-nearest
+    return to_undirected(ei)                   # symmetric
 
-    This is how a production checkpoint trained before the deriv-heads
-    feature existed gets loaded into a `deriv_heads=True` model: everything
-    else must match exactly, or this raises loudly instead of silently
-    leaving some backbone tensor at its random init.
 
-    Args:
-        model: a `SolidGNN(deriv_heads=True)` instance.
-        state_dict: source state_dict (e.g. from an old checkpoint's `model`
-            entry). May or may not already contain grad_head/dtdt_head keys.
+def union_edge_index(pos: torch.Tensor, mesh_edges: torch.Tensor, k: int = 16):
+    """Undirected union of the mesh edges and kNN edges, deduplicated.
 
-    Returns:
-        list of missing key names (all `grad_head.*`/`dtdt_head.*`).
+    mesh_edges: (M, 2) long tensor of unique node pairs (any orientation).
+    Returns (edge_index (2, E) long, is_mesh (E,) float32 flag)."""
+    n = pos.shape[0]
+    knn = knn_edge_index(pos, k=k).to(torch.long)
+    me = mesh_edges.t().to(torch.long)
+    me = torch.cat([me, me.flip(0)], dim=1)                    # both directions
+    mesh_key = me[0] * n + me[1]
+    keys = torch.unique(torch.cat([mesh_key, knn[0] * n + knn[1]]))
+    ei = torch.stack([keys // n, keys % n])
+    is_mesh = torch.isin(keys, mesh_key).to(torch.float32)
+    return ei, is_mesh
 
-    Raises:
-        ValueError: if any non-head (backbone) key is missing after the load,
-            or if the state_dict contains keys the model doesn't recognize.
-    """
-    result = model.load_state_dict(state_dict, strict=False)
-    if result.unexpected_keys:
-        raise ValueError(
-            f"attach_deriv_heads: unexpected extra keys in state_dict "
-            f"(not present in model): {list(result.unexpected_keys)}"
-        )
-    non_head_missing = [
-        k for k in result.missing_keys
-        if not k.startswith("grad_head.") and not k.startswith("dtdt_head.")
-    ]
-    if non_head_missing:
-        raise ValueError(
-            f"attach_deriv_heads: missing backbone keys after load (expected "
-            f"only grad_head.*/dtdt_head.* to be missing): {non_head_missing}"
-        )
-    return list(result.missing_keys)
+
+def union_edge_attr(pos: torch.Tensor, edge_index: torch.Tensor,
+                    is_mesh: torch.Tensor) -> torch.Tensor:
+    """(E, 5): displacement (3), length, mesh-edge flag."""
+    src, dst = edge_index
+    d = pos[dst] - pos[src]
+    return torch.cat([d, d.norm(dim=1, keepdim=True), is_mesh.unsqueeze(1)], dim=1)
+
+
+def load_gnn(state: dict, device):
+    """Build a `SolidGNN` from a `{model, norm, cfg}` dict (see
+    `src.release_io.load_gnn_state`). Returns (model, cfg, norm)."""
+    cfg, norm = state["cfg"], state["norm"]
+    model = SolidGNN(node_in=cfg["node_in"], edge_in=cfg["edge_in"], hidden=cfg["hidden"],
+                     n_blocks=cfg["n_blocks"], g_dim=cfg.get("g_dim", 5)).to(device)
+    model.load_state_dict(state["model"])
+    model.eval()
+    return model, cfg, norm
+
+
+def predict_graph_seconds(model, cfg, norm, X, pos_np, mesh_edges, g_vec,
+                          device="cpu") -> np.ndarray:
+    """Per-node solidification time (s) predicted by the GNN alone.
+
+    `X` is the raw (N, 15) feature matrix, `g_vec` the raw (5,) alloy/mold
+    vector; standardization uses the statistics stored with the weights."""
+    fmean = torch.tensor(norm["feat_mean"], dtype=torch.float32)
+    fstd = torch.tensor(norm["feat_std"], dtype=torch.float32)
+    x = (torch.tensor(X, dtype=torch.float32) - fmean) / fstd
+    pos = torch.tensor(pos_np, dtype=torch.float32)
+    me = torch.tensor(mesh_edges, dtype=torch.long)
+    ei, is_mesh = union_edge_index(pos, me, k=cfg["k"])
+    ea = union_edge_attr(pos, ei, is_mesh)
+    zeros = torch.zeros(x.shape[0], dtype=torch.long, device=device)
+    g = torch.tensor(np.asarray(g_vec), dtype=torch.float32).reshape(1, -1).to(device)
+    with torch.no_grad():
+        yn = model(x.to(device), ei.to(device), ea.to(device), zeros, g)
+    pred_log = yn.cpu().numpy() * norm["y_log_std"] + norm["y_log_mean"]
+    return np.clip(np.expm1(pred_log), 0.0, None)

@@ -2,14 +2,14 @@ import numpy as np
 import pytest
 
 from src.shrinkage import (
-    node_gradient, niyama_exact, niyama_proxy, porosity_risk, NY_CRIT,
+    node_gradient, niyama_proxy, porosity_risk,
     hot_regions, is_fed, macro_shrinkage, top_sinks, feeder_recommendations,
     SHRINKAGE_PCT, screen_casting, _boundary_faces,
 )
 
 
 # ---------------------------------------------------------------------------
-# Structured tet-grid helpers (Task 2+) -- a Kuhn/Freudenthal 6-tet-per-cube
+# Structured tet-grid helpers  -- a Kuhn/Freudenthal 6-tet-per-cube
 # decomposition of a regular nx*ny*nz node lattice (unit spacing unless
 # overridden). This is a conforming triangulation (verified numerically: tet
 # volumes sum exactly to the lattice bounding volume, and internal faces
@@ -103,28 +103,10 @@ def test_node_gradient_no_tets_returns_zeros():
 # (b) niyama_exact
 # ---------------------------------------------------------------------------
 
-def test_niyama_exact_unit_conversion():
-    # gradT = 1000 K/m = 1 degC/mm ; dTdt = -4 K/s -> |Tdot| = 4
-    # Ny = G / sqrt(|Tdot|) = 1 / sqrt(4) = 0.5
-    gradT = np.array([1000.0])
-    dTdt = np.array([-4.0])
-    ny = niyama_exact(gradT, dTdt)
-    np.testing.assert_allclose(ny, [0.5])
 
 
-def test_niyama_exact_eps_guarded_at_zero_dTdt():
-    gradT = np.array([1000.0])
-    dTdt = np.array([0.0])
-    ny = niyama_exact(gradT, dTdt)
-    assert np.isfinite(ny).all()
 
 
-def test_niyama_exact_vectorized():
-    gradT = np.array([1000.0, 2000.0])
-    dTdt = np.array([-4.0, -16.0])
-    ny = niyama_exact(gradT, dTdt)
-    # G = [1, 2] degC/mm ; sqrt(|Tdot|) = [2, 4] -> Ny = [0.5, 0.5]
-    np.testing.assert_allclose(ny, [0.5, 0.5])
 
 
 # ---------------------------------------------------------------------------
@@ -160,38 +142,14 @@ def test_niyama_proxy_eps_guarded_at_zero_t_s():
 # (d) porosity_risk -- absolute mode
 # ---------------------------------------------------------------------------
 
-def test_porosity_risk_absolute_straddling_crit():
-    # grey_iron / ductile_iron NY_CRIT = 0.75
-    ny = np.array([0.5, 0.75, 1.0])
-    mask = porosity_risk(ny, mode="absolute", alloy_family="grey_iron")
-    np.testing.assert_array_equal(mask, [True, False, False])
 
 
-def test_porosity_risk_absolute_steel_crit():
-    ny = np.array([0.9, 1.0, 1.1])
-    mask = porosity_risk(ny, mode="absolute", alloy_family="steel")
-    np.testing.assert_array_equal(mask, [True, False, False])
 
 
-def test_porosity_risk_absolute_unknown_family_raises_keyerror():
-    ny = np.array([0.5, 1.0])
-    with pytest.raises(KeyError):
-        porosity_risk(ny, mode="absolute", alloy_family="unobtainium")
 
 
-def test_porosity_risk_absolute_missing_family_raises_keyerror():
-    ny = np.array([0.5, 1.0])
-    with pytest.raises(KeyError):
-        porosity_risk(ny, mode="absolute")  # alloy_family=None -> loud KeyError, no silent default
 
 
-def test_ny_crit_table():
-    assert NY_CRIT == {
-        "steel": 1.0,
-        "low_alloy_steel": 1.0,
-        "grey_iron": 0.75,
-        "ductile_iron": 0.75,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -200,14 +158,14 @@ def test_ny_crit_table():
 
 def test_porosity_risk_percentile_exact_bottom_10pct():
     ny = np.arange(20, dtype=float)  # 0..19, no ties
-    mask = porosity_risk(ny, mode="percentile", pct=10.0)
+    mask = porosity_risk(ny, pct=10.0)
     assert mask.sum() == 2  # exactly bottom 10% of 20 = 2
     np.testing.assert_array_equal(np.where(mask)[0], [0, 1])
 
 
 def test_porosity_risk_percentile_exact_bottom_10pct_n10():
     ny = np.arange(10, dtype=float)  # 0..9
-    mask = porosity_risk(ny, mode="percentile", pct=10.0)
+    mask = porosity_risk(ny, pct=10.0)
     assert mask.sum() == 1
     np.testing.assert_array_equal(np.where(mask)[0], [0])
 
@@ -219,15 +177,11 @@ def test_porosity_risk_percentile_tie_handling_documented():
     # nominal pct% when duplicates sit at the boundary. Documented behavior,
     # not a bug: deterministic and order-independent.
     ny = np.array([0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
-    mask = porosity_risk(ny, mode="percentile", pct=10.0)
+    mask = porosity_risk(ny, pct=10.0)
     assert mask.sum() == 2
     np.testing.assert_array_equal(np.where(mask)[0], [0, 1])
 
 
-def test_porosity_risk_unknown_mode_raises():
-    ny = np.array([0.5, 1.0])
-    with pytest.raises(ValueError):
-        porosity_risk(ny, mode="bogus")
 
 
 # ---------------------------------------------------------------------------
@@ -311,13 +265,9 @@ def test_is_fed_empty_feed_nodes_is_always_false():
 
 
 # --------------------------------------------------------------------------- #
-# Review finding C1 (final whole-branch review, 2026-08-01): marginal
-# ("sub-resolution", <4 nodes) hot regions mix a lumped-nodal V (stays
-# O(h^3)) with a true iso-surface A (shrinks toward zero as t_max ->
-# hot_threshold) -> M = V/A diverges without bound. Reproduced on the
-# branch's own committed BUKSA smoke artifact (a 1-node region's M=185mm
-# printed a min_modulus_mm=222 feeder recommendation on a 382mm part; 6/16
-# BUKSA regions were 1-3 nodes). Fix: `hot_regions` marks such regions
+# Marginal ("sub-resolution", <4 nodes) hot regions mix a lumped-nodal V
+# (stays O(h^3)) with a true iso-surface A (shrinks toward zero as t_max ->
+# hot_threshold), so M = V/A diverges without bound. `hot_regions` marks such regions
 # "sub_resolution": True; `feeder_recommendations` skips them (logging the
 # count once); `macro_shrinkage` still lists them (volume/severity remain
 # meaningful, only the modulus diverges).
@@ -396,7 +346,7 @@ def test_feeder_recommendations_mixed_regions_skips_only_sub_resolution_ones(cap
 
 
 # --------------------------------------------------------------------------- #
-# Review finding I4 (performance): the mesh's boundary-face structure is
+# the mesh's boundary-face structure is
 # region-independent and hoisted out of `_region_surface_area`'s per-call
 # work into a standalone `_boundary_faces(tets)` helper, computed once by
 # `feeder_recommendations` and shared across every region. A direct check
@@ -428,10 +378,9 @@ def test_hot_regions_top_frac_out_of_range_raises():
 
 
 # ---------------------------------------------------------------------------
-# (a2) is_fed -- adjudicated corridor semantics (2026-08-01 review round 1,
-# finding 1): a warm corridor (t within `corridor_frac` of the region's own
+# (a2) is_fed corridor semantics: a warm corridor (t within `corridor_frac` of the region's own
 # t_max) bridges the region to a feed node several hops away, NOT required
-# to be part of the region's own hot-node set. This is the reviewer's
+# to be part of the region's own hot-node set. This is the
 # REQUIRED test: it must fail both under a `return False` stub (variant 1
 # expects True) and under a naive "touch test" that only checks direct
 # region-to-feed_node adjacency or membership (variant 1's feed node is 6
@@ -482,7 +431,7 @@ def test_is_fed_false_when_feed_node_is_on_far_cold_side():
 
 
 def test_is_fed_region_t_max_zero_is_unfed_not_vacuously_true():
-    """review round 2, finding NEW-2: a region t_max <= 0 would make the
+    """a region t_max <= 0 would make the
     corridor threshold (corridor_frac * t_max) <= 0, vacuously satisfied by
     every non-negative t_s -- i.e. the whole (connected) mesh would count as
     "warm", trivially fed via any non-empty feed_nodes regardless of real
@@ -502,18 +451,16 @@ def test_is_fed_region_t_max_zero_is_unfed_not_vacuously_true():
 
 def _interior_cube_block_mesh():
     """9x6x5 lattice with a fully-interior 3x3x3 node block (a 2x2x2 mm solid
-    cube of 8 sub-cells). Under the fraction-weighted volume rule (review
-    round 1 finding 2), volume_mm3 = 27.0 exactly: each of the 27 hot nodes
+    cube of 8 sub-cells). Under the fraction-weighted volume rule, volume_mm3 = 27.0 exactly: each of the 27 hot nodes
     is fully interior with a complete 8-cube neighborhood, so its lumped
     nodal volume (sum of tet_volume/4 over incident tets) is exactly 1 mm^3
     on this unit-spacing lattice -- hand-verified numerically (independently
     confirmed: fraction-weighted volume == hot-node COUNT here, since
     summing volume*n_hot/4 over all tets is algebraically identical to
-    summing each hot node's own lumped volume). Boundary area (review round 2
-    finding NEW-1) is now `_region_surface_area`'s co-area/domain-boundary
+    summing each hot node's own lumped volume). Boundary area is now `_region_surface_area`'s co-area/domain-boundary
     formula -- see that function's docstring -- which for this fixture comes
     to ~49.31 mm^2 (M = V/A ~= 0.5475, within 15% of the idealized "3x3x3 mm
-    dilated cube" reference of A=54/M=0.5 the reviewer hand-derived; an
+    dilated cube" reference of A=54/M=0.5 derived by hand; an
     exact closed-form match isn't expected for a graded/partial-tet field --
     see `test_feeder_recommendations_modulus_exact` and the mesh-refinement
     drift test below for the actual acceptance checks). The block is exactly
@@ -570,8 +517,8 @@ def _unfed_boss_and_fed_band_10pct_mesh():
     boundary (unfed) -- hand-verified via the boss/band-touches-surface
     assertions below. Band's t_max is deliberately HIGHER than boss's so
     hot_regions sorts band first (region_id=0) and boss second (region_id=1)
-    -- this exposes a positional-reindex bug (region_id coherence, review
-    round 1 finding 3) that a same-valued t_max tie would hide."""
+    -- this exposes a positional-reindex bug (region_id coherence) that a
+    same-valued t_max tie would hide."""
     nx, ny, nz = 10, 5, 4
     pos, tets = _grid_mesh(nx, ny, nz)
     idx = _node_idx(nx, ny)
@@ -601,7 +548,7 @@ def test_macro_shrinkage_excludes_fed_regions():
 def test_region_id_coherence_across_pipeline():
     """region_id must be the STABLE hot_regions index, propagated (not
     positionally re-derived) through macro_shrinkage's filtering and further
-    through top_sinks/feeder_recommendations (review round 1 finding 3)."""
+    through top_sinks/feeder_recommendations."""
     pos, tets, t_s, surface_nodes, boss_nodes, band_nodes = _unfed_boss_and_fed_band_10pct_mesh()
 
     raw_regions = hot_regions(pos, tets, t_s)
@@ -625,8 +572,7 @@ def test_region_id_coherence_across_pipeline():
 
 
 def test_macro_shrinkage_verdict_flips_via_genuine_external_corridor():
-    """review round 2, finding NEW-3 (round 3 cheap follow-up: made the
-    corridor genuinely multi-hop): an end-to-end (not just is_fed-level)
+    """an end-to-end (not just is_fed-level)
     demonstration that a region's fed/unfed verdict can flip because of a
     node that is NOT part of the region (hot_regions' own top-10% cut
     excludes it) and NOT the feed node itself, but sits between
@@ -686,7 +632,7 @@ def test_shrinkage_pct_table():
 # one hot region spanning a top-face node, an interior bridge node, an
 # x-face node, and a y-face node (all connected via tet adjacency through
 # the bridge) -- also reused by feeder_recommendations' rotation tests below
-# (review round 1 finding 5).
+#.
 # ---------------------------------------------------------------------------
 
 def _rotatable_sink_mesh():
@@ -729,7 +675,7 @@ def test_top_sinks_rotated_gravity_relocates_to_x_face():
 # top surface above the region's centroid; ValueError on empty surface_nodes;
 # a degenerate (zero-volume/area) region logs a warning instead of a silent 0.
 #
-# review round 3: `_region_surface_area` now runs marching tetrahedra on the
+# `_region_surface_area` now runs marching tetrahedra on the
 # CONTINUOUS `t_s` field cut at the region's own `hot_threshold`, replacing
 # round 2's co-area formula on a BINARIZED indicator -- the binarized version
 # always crosses each tet edge at its midpoint regardless of where the real
@@ -832,14 +778,14 @@ def _interior_chebyshev_cube_mesh():
 
 
 def test_feeder_recommendations_modulus_level_set_consistent():
-    """review round 3: V and A must measure the same body via a genuine
+    """V and A must measure the same body via a genuine
     continuous-field level set (not an artificially-thresholded binary
     block). On this fixture the true level set is an exact 3x3x3mm cube
     (M = side/6 = 0.5 by the Chvorinov identity for any cube); marching
     tetrahedra on a real linear field still chamfers cube corners/edges
     (hand-verified: the same chamfering appears in an independent marching-
     tets reimplementation, not just the shipped code), so M lands near but
-    not exactly at 0.5 -- within the reviewer's stated 15% band."""
+    not exactly at 0.5 -- within the stated 15% band."""
     pos, tets, t_s, surface_nodes, region = _interior_chebyshev_cube_mesh()
     recs = feeder_recommendations([region], pos, tets, surface_nodes, gravity_vec=(0, 0, -1),
                                   t_s=t_s)
@@ -917,7 +863,7 @@ def test_feeder_recommendations_degenerate_region_warns_instead_of_silent_zero(c
 
 
 def test_feeder_recommendations_region_touching_mesh_skin_exercises_boundary_term(caplog):
-    """review round 3 cheap follow-up: a dedicated, in-suite exercise of the
+    """a dedicated, in-suite exercise of the
     domain-boundary term (a region whose own boundary coincides with the
     mesh's outer surface, so `_region_surface_area`'s "no other side to
     integrate across" correction path actually fires) -- the gravity-
@@ -950,12 +896,7 @@ def _smooth_blob_mesh(spacing, extent=10.0, top_frac=0.05, center_offset=(0.13, 
     density (unlike the axis-aligned block fixtures elsewhere in this file,
     which are deliberately clean/hand-checkable but not representative of a
     "smooth field" mesh-convergence scenario). `center_offset` is a
-    deliberately non-grid-aligned (sub-cell) shift (review round 3: a
-    center placed exactly on a grid node/plane risks the sphere boundary
-    landing at unusually "favorable" axis-aligned tet crossings at every
-    tested density, which would NOT stress-test the anisotropy this
-    fixture exists to catch -- round 2's version used an exact-grid-point
-    center)."""
+    deliberately non-grid-aligned (sub-cell) shift."""
     n = int(round(extent / spacing)) + 1
     pos, tets = _grid_mesh(n, n, n, spacing=spacing)
     center = np.array([extent / 2.0] * 3) + np.array(center_offset)
@@ -965,8 +906,7 @@ def _smooth_blob_mesh(spacing, extent=10.0, top_frac=0.05, center_offset=(0.13, 
 
 
 def test_feeder_recommendations_modulus_refinement_drift_improves_nonaxis(caplog):
-    """review round 3: moved from an exact-grid-centered blob (round 2's
-    version) to an off-grid-centered spherical blob -- a genuinely NON-axis-
+    """moved from an exact-grid-centered blob to an off-grid-centered spherical blob -- a genuinely NON-axis-
     aligned fixture, since the round-2 co-area formula's axis-aligned cuts
     were "the one exact case" and could mask residual anisotropy even on a
     nominally spherical shape if its center happened to sit on a favorable
@@ -974,7 +914,7 @@ def test_feeder_recommendations_modulus_refinement_drift_improves_nonaxis(caplog
     all-4-vertices-hot area rule, M = V/A drifted ~-29% between a coarse and
     2x-refined mesh of a smooth field (worse than the pre-fix-round-1
     baseline of -17%). The marching-tetrahedra area (this round) must keep
-    drift well under the reviewer's 15% bound."""
+    drift well under the 15% bound."""
     import logging as _logging
 
     def modulus_at(spacing):
@@ -993,7 +933,7 @@ def test_feeder_recommendations_modulus_refinement_drift_improves_nonaxis(caplog
 
 
 # ---------------------------------------------------------------------------
-# (g) review round 3 acceptance suite: marching-tets area vs. the ANALYTIC
+# (g) Acceptance suite: marching-tets area vs. the ANALYTIC
 # true value on shapes the old (binarized co-area) formula got badly wrong --
 # a sphere (curved, converging with refinement, not plateauing), a diagonal
 # plane cut through a box (exact via a convex-hull oracle), and an
@@ -1019,9 +959,9 @@ def _sphere_region(spacing, extent=12.0, top_frac=0.03, center_offset=(0.13, 0.2
 
 
 def test_region_area_sphere_converges_not_plateaus():
-    """review round 3 acceptance check #1: sphere-field area must converge
+    """sphere-field area must converge
     toward the analytic 4*pi*R^2 as the mesh refines (error DECREASING),
-    not plateau at the ~24-29% the reviewer measured for the binarized
+    not plateau at the ~24-29% measured for the binarized
     co-area formula."""
     errors = []
     for spacing in (1.0, 0.5, 0.25):
@@ -1089,9 +1029,9 @@ def _diagonal_cut_region(spacing, normal, extent=10.0, top_frac=0.3):
 
 
 def test_region_area_diagonal_plane_cut_error_far_below_old_bias():
-    """review round 3 acceptance check #2: a half-space region cut by a
+    """a half-space region cut by a
     plane along the space diagonal (1,1,1) -- normal not aligned with any
-    mesh axis. Error must be far below the reviewer's reported +36% for the
+    mesh axis. Error must be far below the reported +36% for the
     prior (binarized co-area) formula."""
     for spacing in (1.0, 0.5):
         pos, tets, nodes, t_s, threshold, true_area = _diagonal_cut_region(spacing, (1, 1, 1))
@@ -1100,31 +1040,10 @@ def test_region_area_diagonal_plane_cut_error_far_below_old_bias():
         assert err < 0.10, f"spacing={spacing}: diagonal-cut error {err:.1%} too high"
 
 
-def test_region_area_orientation_sweep_spread_far_below_old_bias():
-    """review round 3 acceptance check #3: the SAME half-space-cut
-    construction at several normals (axis-aligned, face-diagonal, space-
-    diagonal, and a generic non-symmetric direction) -- the spread of
-    relative errors across orientations must be far below the reviewer's
-    reported ~29% orientation sensitivity for the prior formula."""
-    orientations = {
-        "axis-x": (1, 0, 0),
-        "face-diag": (1, 1, 0),
-        "space-diag": (1, 1, 1),
-        "generic": (2, 1, 0.3),
-    }
-    errors = {}
-    for name, normal in orientations.items():
-        pos, tets, nodes, t_s, threshold, true_area = _diagonal_cut_region(0.5, normal)
-        area = _reference_region_area_marching_tets(pos, tets, nodes, t_s, threshold)
-        errors[name] = abs(area - true_area) / true_area
-
-    spread = max(errors.values()) - min(errors.values())
-    assert spread < 0.10, f"orientation-sweep spread {spread:.1%} too high: {errors}"
-    assert all(e < 0.10 for e in errors.values()), f"an orientation exceeded 10% error: {errors}"
 
 
 # ---------------------------------------------------------------------------
-# (f) hot_regions volume -- fraction-weighted rule (review round 1 finding 2):
+# (f) hot_regions volume -- fraction-weighted rule:
 # each tet contributes tet_volume * n_hot_vertices/4, replacing an earlier
 # all-4-vertices-hot rule that discarded (undercounted) every boundary tet.
 # ---------------------------------------------------------------------------
@@ -1193,46 +1112,12 @@ def test_determinism_hot_regions_and_downstream():
 
 
 # ---------------------------------------------------------------------------
-# Task 3: screen_casting orchestrator -- one call combining Niyama (exact when
-# gradT+dTdt given, proxy otherwise), macro-shrinkage, top sinks, feeder
-# recommendations, and an optional fixed-axis gravity sweep.
-#
-# NOTE (brief deviation, owner-adjudicated -- see src/shrinkage.py's
-# `screen_casting` docstring): the brief's signature in
-# docs/superpowers/plans/2026-08-01-sp2-shrinkage.md does not carry a
-# `feed_nodes` parameter, but `macro_shrinkage`/`is_fed` (task 2, review round
-# 1) require an explicit ADIABATIC-face feed-node array -- distinct from and
-# not derivable from `surface_nodes` (the whole free surface, used only for
-# sink/feeder placement). `feed_nodes=None` defaults to an empty array, the
-# same "bare sand casting, no risers, everything unfed" convention already
-# used by `macro_shrinkage`/`is_fed` directly.
+# screen_casting: one call combining the Niyama proxy, macro-shrinkage, top
+# sinks and feeder recommendations. `feed_nodes` (adiabatic-face nodes) is
+# separate from `surface_nodes` (the whole free surface, used for sink and
+# feeder placement); None means no feed source, so every region is unfed.
 # ---------------------------------------------------------------------------
 
-def test_screen_casting_exact_niyama_when_fields_given():
-    nx = ny = nz = 4
-    pos, tets = _grid_mesh(nx, ny, nz)
-    n_nodes = pos.shape[0]
-    t_s = pos[:, 0].copy() + 1.0  # linear ramp along x, strictly positive
-    surface_nodes = _surface_nodes(nx, ny, nz)
-    gradT = np.full(n_nodes, 1000.0)   # 1000 K/m = 1 degC/mm
-    dTdt = np.full(n_nodes, -4.0)      # |Tdot|=4 -> Ny = 1/sqrt(4) = 0.5 everywhere
-    TL, TS = 1400.0, 1100.0
-
-    result = screen_casting(pos, tets, surface_nodes, t_s, TL, TS, "steel",
-                            gradT=gradT, dTdt=dTdt)
-
-    assert result["niyama_source"] == "exact"
-    expected_ny = niyama_exact(gradT, dTdt)
-    np.testing.assert_allclose(result["niyama"], expected_ny)
-    expected_risk = porosity_risk(expected_ny, mode="absolute", alloy_family="steel")
-    np.testing.assert_array_equal(result["porosity_risk"], expected_risk)
-    # Ny=0.5 < NY_CRIT["steel"]=1.0 everywhere -> every node at risk.
-    assert result["porosity_risk"].all()
-    assert result["material"] == {"alloy_family": "steel", "shrinkage_pct": 2.5}
-    assert result["per_orientation"] is None
-    assert isinstance(result["macro_shrinkage"], list)
-    assert isinstance(result["top_sinks"], list)
-    assert isinstance(result["feeders"], list)
 
 
 def test_screen_casting_proxy_niyama_when_fields_omitted():
@@ -1247,38 +1132,11 @@ def test_screen_casting_proxy_niyama_when_fields_omitted():
     assert result["niyama_source"] == "proxy"
     expected_ny = niyama_proxy(pos, tets, t_s, TL, TS)
     np.testing.assert_allclose(result["niyama"], expected_ny)
-    expected_risk = porosity_risk(expected_ny, mode="percentile")
+    expected_risk = porosity_risk(expected_ny)
     np.testing.assert_array_equal(result["porosity_risk"], expected_risk)
     assert result["material"] == {"alloy_family": "grey_iron", "shrinkage_pct": 0.0}
 
 
-def test_screen_casting_orientations_axes_sweep_has_six_entries_matching_single_call():
-    pos, tets, t_s, surface_nodes, block_nodes = _interior_cube_block_mesh()
-    TL, TS = 1400.0, 1100.0
-
-    swept = screen_casting(pos, tets, surface_nodes, t_s, TL, TS, "steel",
-                           orientations="axes")
-    assert swept["per_orientation"] is not None
-    assert set(swept["per_orientation"].keys()) == {"+x", "-x", "+y", "-y", "+z", "-z"}
-    for axis, entry in swept["per_orientation"].items():
-        assert set(entry.keys()) == {"macro_shrinkage", "top_sinks", "feeders"}
-        assert len(entry["macro_shrinkage"]) == 1  # gravity-independent region detection
-
-    single = screen_casting(pos, tets, surface_nodes, t_s, TL, TS, "steel",
-                            gravity_vec=(0, 0, -1))
-    assert single["per_orientation"] is None
-
-    neg_z = swept["per_orientation"]["-z"]
-    assert len(neg_z["feeders"]) == len(single["feeders"]) == 1
-    assert neg_z["feeders"][0]["region_id"] == single["feeders"][0]["region_id"]
-    np.testing.assert_allclose(neg_z["feeders"][0]["location"], single["feeders"][0]["location"])
-    assert neg_z["feeders"][0]["min_modulus_mm"] == pytest.approx(single["feeders"][0]["min_modulus_mm"])
-    assert len(neg_z["top_sinks"]) == len(single["top_sinks"])
-
-    # sanity: the sweep isn't a no-op -- flipping gravity along z relocates the
-    # feeder to the opposite face.
-    plus_z = swept["per_orientation"]["+z"]
-    assert plus_z["feeders"][0]["location"][2] != neg_z["feeders"][0]["location"][2]
 
 
 def test_screen_casting_unknown_alloy_family_raises_loud_error_naming_known_families():
@@ -1303,3 +1161,26 @@ def test_screen_casting_feed_nodes_default_is_empty_bare_casting_convention():
     fed_call = screen_casting(pos, tets, surface_nodes, t_s, TL, TS, "steel",
                               feed_nodes=surface_nodes)
     assert len(fed_call["macro_shrinkage"]) == 1  # band fed away via feed_nodes=surface_nodes
+
+
+def test_region_area_orientation_sweep_spread_far_below_old_bias():
+    """The SAME half-space-cut
+    construction at several normals (axis-aligned, face-diagonal, space-
+    diagonal, and a generic non-symmetric direction) -- the spread of
+    relative errors across orientations must be far below the ~29% orientation
+    sensitivity of a binarized co-area estimate."""
+    orientations = {
+        "axis-x": (1, 0, 0),
+        "face-diag": (1, 1, 0),
+        "space-diag": (1, 1, 1),
+        "generic": (2, 1, 0.3),
+    }
+    errors = {}
+    for name, normal in orientations.items():
+        pos, tets, nodes, t_s, threshold, true_area = _diagonal_cut_region(0.5, normal)
+        area = _reference_region_area_marching_tets(pos, tets, nodes, t_s, threshold)
+        errors[name] = abs(area - true_area) / true_area
+
+    spread = max(errors.values()) - min(errors.values())
+    assert spread < 0.10, f"orientation-sweep spread {spread:.1%} too high: {errors}"
+    assert all(e < 0.10 for e in errors.values()), f"an orientation exceeded 10% error: {errors}"

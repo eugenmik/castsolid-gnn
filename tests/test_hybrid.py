@@ -1,34 +1,14 @@
 import logging
-import os
 
 import numpy as np
 import pytest
-from src.hybrid import (hybrid_field, hybrid_field_affine, hybrid_field_max_anchor,
-                        hybrid_field_soft)
+from src.hybrid import hybrid_field_affine, hybrid_field_max_anchor, hybrid_field_soft
 
 
-def test_hybrid_takes_shape_from_gnn_level_from_baseline():
-    # GNN shape [-1,0,+1] around mean 5; baseline mean 20 (shape irrelevant)
-    gnn = np.array([4.0, 5.0, 6.0])          # deviations -1,0,+1
-    base = np.array([18.0, 22.0, 20.0])      # mean 20
-    out = hybrid_field(gnn, base)
-    # deviations preserved from GNN, level set to baseline mean (20)
-    np.testing.assert_allclose(out, [19.0, 20.0, 21.0])
 
 
-def test_hybrid_clips_negative():
-    gnn = np.array([0.0, 10.0])              # mean 5, devs -5,+5
-    base = np.array([1.0, 1.0])              # mean 1 -> level 1: -4, +6 -> clip -4 to 0
-    out = hybrid_field(gnn, base)
-    np.testing.assert_allclose(out, [0.0, 6.0])
 
 
-def test_hybrid_preserves_within_graph_ranking():
-    # hot-spot ranking (argsort) must come from the GNN shape, unchanged by re-leveling
-    gnn = np.array([3.0, 1.0, 9.0, 5.0])
-    base = np.array([100.0, 100.0, 100.0, 100.0])
-    out = hybrid_field(gnn, base)
-    assert list(np.argsort(out)) == list(np.argsort(gnn))
 
 
 def test_hybrid_affine_spread_match():
@@ -59,9 +39,8 @@ def test_hybrid_affine_preserves_ranking():
 
 def test_hybrid_affine_clamp_high():
     # gnn std is 10; std_seconds=100 -> a_raw=10.0, clamped down to the a_clamp
-    # ceiling (widened 3.0 -> 5.0 by the 2026-07-31 spec amendment). No clipping
-    # occurs at a=5.0 here (total=1000 is large), so this exercises the fast
-    # (pre-amendment closed-form) path's own clamp handling.
+    # ceiling 5.0. No clipping occurs at a=5.0 here (total=1000 is large), so
+    # this exercises the closed-form path's own clamp handling.
     gnn = np.array([0.0, 20.0])
     total = 1000.0
     pred, info = hybrid_field_affine(gnn, total, std_seconds=100.0)
@@ -96,8 +75,8 @@ def test_hybrid_affine_clip_negative():
 
 
 def test_hybrid_affine_heavy_clip_achievable():
-    # Real fields under FT3 gate 4 sometimes need heavy scaling to hit the
-    # GBM's std target; the pre-amendment closed form ignores clipping
+    # Real fields sometimes need heavy scaling to hit the spread head's
+    # target; a closed form that ignores clipping
     # entirely, so its implied `a` can leave the delivered std far short of
     # the target. Construct such a case (right-skewed field; the naive
     # closed-form `a` clips ~30% of nodes) and confirm the clip-aware solve
@@ -123,8 +102,7 @@ def test_hybrid_affine_heavy_clip_achievable():
 def test_hybrid_affine_unachievable_due_to_clipping():
     # std_seconds=8.0 exceeds this field's interior PEAK (f rises past
     # a_clipstart to a peak around a~1.78, std~3.82, then falls -- it never
-    # reaches 8.0 anywhere in the clamp range). Per the 2026-07-31 review
-    # correction, the unreachable case must pick the scanned point CLOSEST to
+    # reaches 8.0 anywhere in the clamp range). The unreachable case must pick the scanned point CLOSEST to
     # the target (here, at/near the peak) rather than blindly clamping to
     # a_clamp[1]=5.0 -- clamping to 5.0 would give a worse fit (std~3.45,
     # clip_frac 0.7) than the peak (std~3.82, clip_frac 0.4).
@@ -142,30 +120,6 @@ def test_hybrid_affine_unachievable_due_to_clipping():
     assert abs(achieved - 8.0) < abs(np.std(at_hi) - 8.0)
 
 
-_A_00968 = "data/features_v4/graphs/A_00968.npz"
-
-
-@pytest.mark.skipif(not os.path.exists(_A_00968),
-                    reason="requires the FT2a v4 feature cache "
-                           "(data/features_v4/graphs/A_00968.npz) on disk")
-def test_hybrid_affine_real_field_returns_smallest_root_not_ceiling():
-    # Regression for the 2026-07-31 review finding: on a REAL per-node `y`
-    # field, f(a) has an interior peak (~a=2.67, std~420.5) then falls
-    # (f(5.0)~390.8). A naive `f(hi) < std_target => clamp` pre-check would
-    # wrongly land on a=5.0 (clip_frac~0.48) even though a much-less-clipped
-    # true root exists near the peak's rising edge (a~2.6, clip_frac~0.07).
-    # The clip-aware solve must find that smaller root, not the ceiling.
-    data = np.load(_A_00968)
-    y = data["y"].astype(np.float64)
-    total = 1000.0
-    target = 419.0  # inside the narrow (f(a_clipstart), peak_f) crossing window
-
-    pred, info = hybrid_field_affine(y, total, target)
-
-    assert info["a_clamped"] is False
-    assert info["a"] != pytest.approx(5.0)
-    assert info["clip_frac"] < 0.3
-    assert np.std(pred) == pytest.approx(target, rel=1e-3)
 
 
 def test_hybrid_affine_no_clip_matches_pre_amendment_closed_form():
@@ -193,87 +147,18 @@ def test_hybrid_affine_no_clip_matches_pre_amendment_closed_form():
     np.testing.assert_allclose(pred_new, pred_old, rtol=1e-6)
 
 
-# --------------------------------------------------------------------------- #
-# AMENDMENT 2: lambda-shrinkage of the affine spread target (2026-07-31)
-# --------------------------------------------------------------------------- #
-def test_hybrid_affine_lambda_default_bit_identical_on_clip_heavy_case():
-    # lambda_shrink=1.0 (the default) must be byte-for-bit identical to
-    # calling hybrid_field_affine with no lambda_shrink argument at all --
-    # on a CLIP-HEAVY case (the heavy-clip-achievable field from round 1),
-    # to prove the guard skips the new code path even when the solve
-    # actually clips (not just in a trivial no-clip case).
-    g = np.random.default_rng(1).exponential(5.0, size=200)
-    total = 8.0
-    target = 0.3 * np.std(g)
-
-    pred_default, info_default = hybrid_field_affine(g, total, target)
-    pred_lambda1, info_lambda1 = hybrid_field_affine(g, total, target, lambda_shrink=1.0)
-
-    assert np.array_equal(pred_default, pred_lambda1)
-    assert info_default["a"] == info_lambda1["a"]
-    assert info_default["clip_frac"] == info_lambda1["clip_frac"]
-    assert info_lambda1["lambda_shrink"] == 1.0
-    assert info_lambda1["std_target_effective"] == pytest.approx(target, rel=1e-12)
 
 
-def test_hybrid_affine_lambda_zero_targets_gnn_own_spread():
-    # lambda_shrink=0.0 -> std_eff = std(gnn)**1 * std_target**0 = std(gnn)
-    # exactly, regardless of std_target's value. In a no-clip case this
-    # makes a==1.0 (no spread rescaling at all), so the result must equal
-    # hybrid_field_max_anchor's pure quantile-anchor level shift exactly.
-    gnn = np.array([3.0, 1.0, 9.0, 5.0])
-    total = 1000.0
-    pred, info = hybrid_field_affine(gnn, total, std_seconds=999.0, lambda_shrink=0.0)
-    expected = hybrid_field_max_anchor(gnn, total)
-    assert info["a"] == pytest.approx(1.0, rel=1e-9)
-    assert info["a_clamped"] is False
-    assert info["std_target_effective"] == pytest.approx(np.std(gnn), rel=1e-9)
-    np.testing.assert_allclose(pred, expected, rtol=1e-9)
 
 
-def test_hybrid_affine_lambda_half_is_geometric_mean_of_stds():
-    # lambda_shrink=0.5 -> std_eff = sqrt(std(gnn) * std_target). In a
-    # no-clip case the achieved std equals std_eff exactly (fast path).
-    gnn = np.array([0.0, 20.0])  # std(gnn) == 10
-    total = 1000.0  # large enough that nothing clips
-    std_target = 20.0
-    s = np.std(gnn)
-
-    pred, info = hybrid_field_affine(gnn, total, std_target, lambda_shrink=0.5)
-
-    expected_std_eff = np.sqrt(s * std_target)
-    assert info["std_target_effective"] == pytest.approx(expected_std_eff, rel=1e-9)
-    assert info["a_clamped"] is False
-    assert np.std(pred) == pytest.approx(expected_std_eff, rel=1e-9)
 
 
-def test_hybrid_affine_lambda_info_carries_new_keys():
-    gnn = np.array([3.0, 1.0, 9.0, 5.0])
-    pred, info = hybrid_field_affine(gnn, 1000.0, 5.0, lambda_shrink=0.7)
-    assert "lambda_shrink" in info
-    assert "std_target_effective" in info
-    assert info["lambda_shrink"] == pytest.approx(0.7)
-    assert isinstance(info["std_target_effective"], float)
 
 
-def test_hybrid_affine_lambda_nondefault_degenerate_std_target_falls_back(caplog):
-    # std_seconds <= 0 is only inspected when lambda_shrink != 1.0 (the
-    # default path never checks its sign) -- with a non-default lambda it
-    # must fall back to the quantile-anchor with the same loud-warning
-    # pattern as the degenerate-GNN-field guard.
-    gnn = np.array([3.0, 1.0, 9.0, 5.0])
-    total = 1000.0
-    with caplog.at_level(logging.WARNING):
-        pred, info = hybrid_field_affine(gnn, total, std_seconds=0.0, lambda_shrink=0.5)
-    expected = hybrid_field_max_anchor(gnn, total)
-    np.testing.assert_allclose(pred, expected)
-    assert info["degenerate_fallback"] is True
-    assert info["lambda_shrink"] == 0.5
-    assert any("degenerate" in rec.message.lower() for rec in caplog.records)
 
 
 # --------------------------------------------------------------------------- #
-# hybrid_field_soft: weighted two-target soft recomposition (2026-07-31)
+# hybrid_field_soft: weighted two-target soft recomposition
 # --------------------------------------------------------------------------- #
 def _squeezed_case():
     # A field with a small (3%) group of low-value outlier nodes and a tight
@@ -349,77 +234,20 @@ def test_hybrid_soft_degenerate_flat_field_falls_back(caplog):
     assert any("degenerate" in rec.message.lower() for rec in caplog.records)
 
 
-def test_hybrid_soft_info_dict_carries_all_keys():
-    g, total, target = _squeezed_case()
-    pred, info = hybrid_field_soft(g, total, target)
-    expected_keys = {"a", "m", "target_unreachable", "degenerate_fallback", "clip_frac",
-                     "total_deviation_frac", "j_total_resid", "j_std_resid",
-                     "lambda_shrink", "std_target_effective"}
-    assert expected_keys <= set(info.keys())
-    # clip_frac must be measured on the FINAL (returned) field.
-    a, m = info["a"], info["m"]
-    c = g - g.mean()
-    final_raw = a * c + m
-    assert info["clip_frac"] == pytest.approx(float((final_raw < 0.0).mean()))
 
 
-def test_hybrid_soft_lambda_shrink_matches_v5_convention():
-    gnn = np.array([0.0, 20.0])
-    total = 1000.0
-    std_seconds = 20.0
-    s = np.std(gnn)
-    pred, info = hybrid_field_soft(gnn, total, std_seconds, lambda_shrink=0.5)
-    expected = (s ** 0.5) * (std_seconds ** 0.5)
-    assert info["std_target_effective"] == pytest.approx(expected, rel=1e-9)
 
 
 # --------------------------------------------------------------------------- #
-# Review round 1 (2026-07-31) fix coverage: CRITICAL-1 (m-window centered on
-# the seed, not the absolute total*[0.7,1.3]), CRITICAL-2 (perf budget), LOW-6
-# (a_clamp[0]<=0 guard), LOW-7 (realistic-scale degeneration case).
+# Edge cases: the a_clamp[0] <= 0 guard and degeneration to the affine solve
+# at a realistic scale.
 # --------------------------------------------------------------------------- #
-_REAL_FIELD_STEMS = ["A_00968", "A_01541", "C_00681"]
-_REAL_FIELD_PATHS = [f"data/features_v4/graphs/{stem}.npz" for stem in _REAL_FIELD_STEMS]
 
 
-@pytest.mark.parametrize("path", _REAL_FIELD_PATHS)
-def test_hybrid_soft_engages_with_interior_optimum_on_real_fields(path):
-    # Reviewer-mandated re-verification for CRITICAL-1: on real per-node `y`
-    # fields with std_t just past the affine solve's own reach (1.1-1.5x
-    # std(g)), the soft solve at DEFAULT weights must engage (not just return
-    # the seed) with an INTERIOR `a` (strictly inside a_clamp, not pinned to
-    # either boundary) and a single-digit-percent total deviation -- verified
-    # interactively before encoding: e.g. A_00968 at 1.3x gives a~1.28 (vs
-    # a_clamp (0.3, 5.0)) and total_deviation_frac ~3.8%.
-    if not os.path.exists(path):
-        pytest.skip(f"requires the FT2a v4 feature cache ({path}) on disk")
-    data = np.load(path)
-    y = data["y"].astype(np.float64)
-    s = float(np.std(y))
-    total = float(np.quantile(y, 0.995))
-
-    engaged = False
-    for mult in (1.1, 1.2, 1.3, 1.4, 1.5):
-        target = mult * s
-        pred_affine, info_affine = hybrid_field_affine(y, total, target)
-        if not info_affine["a_clamped"]:
-            continue  # affine already reaches this target -- nothing to trade
-        engaged = True
-        pred_soft, info_soft = hybrid_field_soft(y, total, target)
-        assert info_soft["target_unreachable"] is True
-        a_clamp = (0.3, 5.0)
-        assert a_clamp[0] * 1.001 < info_soft["a"] < a_clamp[1] * 0.999, (
-            f"expected an interior optimum, got a={info_soft['a']!r}")
-        assert abs(info_soft["total_deviation_frac"]) < 0.10
-        # the soft solve must never do WORSE than the affine seed on std:
-        d_affine = abs(np.std(pred_affine) - target)
-        d_soft = abs(np.std(pred_soft) - target)
-        assert d_soft <= d_affine + 1e-9
-    assert engaged, f"{path}: no mult in (1.1..1.5) made the affine solve a_clamped=True"
 
 
 def test_hybrid_soft_realistic_scale_exact_degeneration_matches_affine():
-    # LOW-7: the original exact-degeneration test used a 2-node toy field;
+    # The exact-degeneration test above uses a 2-node toy field;
     # this adds a realistic-scale (n=5000), right-skewed synthetic field with
     # an EASILY achievable std target (no clipping needed at all), so the
     # affine seed hits both targets and the soft solve must reduce to it
@@ -447,7 +275,7 @@ def test_hybrid_soft_a_clamp_lo_nonpositive_raises():
 
 
 def test_hybrid_soft_negative_weight_raises():
-    # Review round 1, LOW: a negative weight rewards moving AWAY from that
+    # LOW: a negative weight rewards moving AWAY from that
     # target (minimizing J then maximizes the residual's square) -- must
     # raise loudly rather than silently drive a to a nonsensical optimum.
     gnn = np.array([1.0, 2.0, 3.0])
@@ -458,7 +286,7 @@ def test_hybrid_soft_negative_weight_raises():
 
 
 def test_hybrid_soft_both_weights_zero_raises():
-    # Review round 1, LOW: w_total == w_std == 0 makes J identically zero
+    # LOW: w_total == w_std == 0 makes J identically zero
     # everywhere -- no signal for the search to optimize against.
     gnn = np.array([1.0, 2.0, 3.0])
     with pytest.raises(ValueError, match="w_total|w_std"):
@@ -476,7 +304,7 @@ def test_hybrid_soft_one_weight_zero_is_allowed():
 
 
 def test_hybrid_soft_accepted_optimum_majority_clipped_warns(caplog):
-    # LOW-5: the affine path already warns when ITS OWN clip_frac > 0.5; the
+    # The affine path already warns when ITS OWN clip_frac > 0.5; the
     # soft path must emit the analogous warning when the ACCEPTED soft
     # optimum (which can differ from the affine seed) itself clips a
     # majority of the field.
@@ -492,25 +320,17 @@ def test_hybrid_soft_accepted_optimum_majority_clipped_warns(caplog):
               for rec in caplog.records)
 
 
-@pytest.mark.parametrize("path", _REAL_FIELD_PATHS)
-def test_hybrid_soft_perf_budget_10k_nodes(path):
-    # CRITICAL-2: < 200ms/10k-node budget (generous 2x margin here to avoid
-    # CI flakiness while still catching a gross regression). Measured on
-    # dev hardware: ~40-60ms per real field at n=5.4k-8k nodes engaged.
-    import time
-    if not os.path.exists(path):
-        pytest.skip(f"requires the FT2a v4 feature cache ({path}) on disk")
-    data = np.load(path)
-    y = data["y"].astype(np.float64)
-    s = float(np.std(y))
-    total = float(np.quantile(y, 0.995))
-    target = 1.4 * s  # engages the grid search on all three reference fields
 
-    hybrid_field_soft(y, total, target)  # warm-up (import/JIT-adjacent costs)
-    times = []
-    for _ in range(3):
-        t0 = time.perf_counter()
-        hybrid_field_soft(y, total, target)
-        times.append(time.perf_counter() - t0)
-    budget_s = 0.200 * (len(y) / 10_000) * 2  # scale budget to n, then 2x slack
-    assert min(times) < budget_s, f"{path}: {min(times)*1000:.1f}ms exceeds {budget_s*1000:.1f}ms budget"
+
+def test_hybrid_soft_info_dict_carries_all_keys():
+    g, total, target = _squeezed_case()
+    pred, info = hybrid_field_soft(g, total, target)
+    expected_keys = {"a", "m", "target_unreachable", "degenerate_fallback", "clip_frac",
+                     "total_deviation_frac", "j_total_resid", "j_std_resid",
+                     "std_target_effective"}
+    assert expected_keys <= set(info.keys())
+    # clip_frac must be measured on the FINAL (returned) field.
+    a, m = info["a"], info["m"]
+    c = g - g.mean()
+    final_raw = a * c + m
+    assert info["clip_frac"] == pytest.approx(float((final_raw < 0.0).mean()))

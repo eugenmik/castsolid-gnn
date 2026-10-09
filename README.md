@@ -32,10 +32,10 @@ flowchart LR
   G --> H[ParaView / web viewer]
 ```
 
-1. CAD import and healing (`tools/doe/prep_parts.py`). The STEP file is read through Gmsh's
+1. CAD import and healing (`src/meshing.py`). The STEP file is read through Gmsh's
    OpenCASCADE kernel. If it holds several solids, the largest one is kept as the casting, and
    the geometry goes through a healing pass before meshing.
-2. Meshing (`tools/doe/prep_parts.py`, `src/mesh_cache.py`). Gmsh builds a tetrahedral mesh.
+2. Meshing (`src/meshing.py`, `src/mesh_cache.py`). Gmsh builds a tetrahedral mesh.
    The element size is searched until the mesh has about 8,500 nodes, the density the model was
    trained on. The whole outer surface is tagged `Cooling`, meaning it cools into a green-sand
    mold. Meshes are cached in `runs/mesh_cache/`, keyed on a hash of the STEP file, the target
@@ -152,42 +152,27 @@ Healing and meshing take most of the time, from seconds to a few minutes for typ
 The prediction and the screening themselves take seconds. Very large or very detailed STEP files, with
 thousands of small faces, can run past the meshing time limit.
 
-## Recovering solver node order
-
-The training data for the model came from FEniCSx, and the worst defect in the project lived in
-the data pipeline, not the network. The solver stored temperatures in dolfinx degree-of-freedom
-order, while coordinates and geometric features were in gmsh node order. About 60% of the nodal
-targets were silently attached to the wrong positions.
-
-The scripts in [`tools/recovery/`](tools/recovery/) rebuild the permutation between the two
-orderings, and `src/build_dataset.py` applies it when it builds graph data. If you connect a
-solver to an ML pipeline, check node identity across every solver and mesh interface before you
-tune a model.
-
 ## Repository map
 
 ```text
 src/
   predict_casting.py    STEP-to-result orchestration and CLI
-  model_api.py          mesh-in, field-out model interface
-  release_io.py         loading of the published weights (safetensors, skops)
-  step_mesh.py          fixed-size Gmsh meshing (--elem-size)
+  meshing.py            CAD import, healing and Gmsh meshing (density search or fixed size)
   mesh_cache.py         content-addressed mesh cache
   msh_parse.py          gmsh 2.2 reader
-  features.py           node features computed from the mesh
+  model_api.py          the model: mesh in, field out (see the Hugging Face card)
+  features.py, geometry.py, model_gnn.py, gbm_heads.py, hybrid.py, release_io.py
+                        model internals and weight loading
+  inference_props.py    alloy and mold lookup
   ood.py                training-envelope check
   shrinkage.py          shrinkage screening
-  inference_props.py    alloy and mold lookup
   webapp.py, viz.py     local browser viewer
-  build_dataset.py, train_*.py   dataset building and training code
-tools/
-  doe/prep_parts.py     CAD healing and density-targeted meshing
-  doe/load_properties.py  property table loader
-  recovery/             solver-DOF to mesh-node recovery
-  export_release.py     conversion of internal checkpoints to the published formats
 data/properties/        alloy and mold tables
-tests/                  deterministic unit tests
+tests/                  unit tests
 ```
+
+This repository holds the inference code only. Training code and the simulation data are not
+published.
 
 ## Practical limits
 

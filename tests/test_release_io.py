@@ -1,82 +1,55 @@
-"""Public-release artifact formats round-trip exactly (src/release_io.py)."""
-import os
+import collections
+import json
 
 import numpy as np
 import pytest
 import torch
+from safetensors.torch import save_file
 
-from src.model_gnn import SolidGNN
 from src import release_io as rio
 
 
-def _ckpt():
-    torch.manual_seed(0)
-    cfg = {"hidden": 16, "n_blocks": 2, "node_in": 15, "edge_in": 5, "two_head": True,
-           "film": True, "g_dim": 5, "graph": "union", "k": 16, "feature_version": 4}
-    model = SolidGNN(node_in=15, edge_in=5, hidden=16, n_blocks=2, two_head=True,
-                     film=True, g_dim=5)
-    norm = {"feat_mean": np.arange(15, dtype=np.float32),
-            "feat_std": np.ones(15, dtype=np.float64),
-            "g_mean": torch.zeros(5), "y_log_mean": 3.5}
-    return {"model": model.state_dict(), "norm": norm, "cfg": cfg}
+def _write_gnn(path, fmt=rio.GNN_FORMAT):
+    tensors = {"model.w": torch.arange(6, dtype=torch.float32).reshape(2, 3),
+               "norm.feat_mean": torch.from_numpy(np.arange(3, dtype=np.float32))}
+    meta = {"format": fmt, "cfg": json.dumps({"hidden": 16, "k": 4}),
+            "norm_kinds": json.dumps({"feat_mean": "numpy"}),
+            "norm_scalars": json.dumps({"y_log_mean": 3.5})}
+    save_file(tensors, str(path), metadata=meta)
 
 
-def test_gnn_safetensors_roundtrip(tmp_path):
-    pytest.importorskip("safetensors")
-    state = _ckpt()
-    out = str(tmp_path / "gnn.safetensors")
-    rio.save_gnn_release(state, out)
-    back = rio.load_gnn_state(out)
-    assert back["cfg"] == state["cfg"]
-    assert set(back["model"]) == set(state["model"])
-    for k, v in state["model"].items():
-        assert torch.equal(back["model"][k], v)
-    n = back["norm"]
-    assert isinstance(n["feat_mean"], np.ndarray) and n["feat_mean"].dtype == np.float32
-    assert n["feat_std"].dtype == np.float64
-    assert isinstance(n["g_mean"], torch.Tensor)
-    assert n["y_log_mean"] == 3.5
-    np.testing.assert_array_equal(n["feat_mean"], state["norm"]["feat_mean"])
-    # load_gnn_any dispatches on the extension
-    assert rio.load_gnn_any(out, "cpu")["cfg"] == state["cfg"]
+def test_load_gnn_state(tmp_path):
+    p = tmp_path / "gnn.safetensors"
+    _write_gnn(p)
+    state = rio.load_gnn_state(str(p))
+    assert state["cfg"] == {"hidden": 16, "k": 4}
+    assert torch.equal(state["model"]["w"], torch.arange(6, dtype=torch.float32).reshape(2, 3))
+    assert isinstance(state["norm"]["feat_mean"], np.ndarray)
+    assert state["norm"]["feat_mean"].dtype == np.float32
+    assert state["norm"]["y_log_mean"] == 3.5
 
 
-def test_gnn_rejects_foreign_safetensors(tmp_path):
-    st = pytest.importorskip("safetensors.torch")
-    out = str(tmp_path / "other.safetensors")
-    st.save_file({"w": torch.zeros(2)}, out)
+def test_load_gnn_state_rejects_other_files(tmp_path):
+    p = tmp_path / "other.safetensors"
+    _write_gnn(p, fmt="something-else")
     with pytest.raises(ValueError, match="not a"):
-        rio.load_gnn_state(out)
+        rio.load_gnn_state(str(p))
 
 
-def test_gbm_skops_roundtrip(tmp_path):
-    pytest.importorskip("skops")
+def test_load_gbm_roundtrip(tmp_path):
+    skops = pytest.importorskip("skops.io")
     from sklearn.ensemble import HistGradientBoostingRegressor
     rng = np.random.default_rng(0)
     X, y = rng.normal(size=(200, 4)), rng.normal(size=200)
     m = HistGradientBoostingRegressor(max_iter=20).fit(X, y)
-    out = str(tmp_path / "gbm.skops")
-    rio.save_gbm_release(m, out)
-    back = rio.load_gbm(out)
-    np.testing.assert_array_equal(back.predict(X), m.predict(X))
+    p = tmp_path / "gbm.skops"
+    skops.dump(m, str(p))
+    np.testing.assert_array_equal(rio.load_gbm(p).predict(X), m.predict(X))
 
 
-def test_load_gbm_passthrough():
-    assert rio.load_gbm(None) is None
-    obj = object()
-    assert rio.load_gbm(obj) is obj
-
-
-def test_resolve_artifact(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    internal = "runs/ft3_gbm/hgb_v3.joblib"
-    release = rio.RELEASE_PATHS[internal]
-    assert rio.resolve_artifact(internal) == internal  # neither exists
-    os.makedirs(os.path.dirname(release))
-    open(release, "w").close()
-    assert rio.resolve_artifact(internal) == release   # only release exists
-    os.makedirs(os.path.dirname(internal))
-    open(internal, "w").close()
-    assert rio.resolve_artifact(internal) == internal  # internal wins
-    assert rio.resolve_artifact("some/other.joblib") == "some/other.joblib"
-    assert rio.resolve_artifact(None) is None
+def test_load_gbm_refuses_foreign_types(tmp_path):
+    skops = pytest.importorskip("skops.io")
+    p = tmp_path / "bad.skops"
+    skops.dump({"c": collections.Counter(a=1)}, str(p))
+    with pytest.raises(ValueError, match="unexpected types"):
+        rio.load_gbm(p)

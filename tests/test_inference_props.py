@@ -36,8 +36,7 @@ def test_props_json_override_and_missing_keys(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Review finding I2 (final whole-branch review, 2026-08-01): a `--props`
-# custom-JSON override with TL <= TS was previously unvalidated -- silently
+# A `--props` custom-JSON override with TL <= TS was previously unvalidated -- silently
 # collapsing src.shrinkage.niyama_proxy to 0 everywhere (100% flagged).
 # --------------------------------------------------------------------------- #
 def test_props_json_tl_less_equal_ts_raises(tmp_path):
@@ -68,21 +67,6 @@ def test_named_alloy_tl_ts_still_valid_after_i2_guard():
         assert p["TL"] > p["TS"]
 
 
-# --------------------------------------------------------------------------- #
-# resolve_alloy_family (SP2 shrinkage Task 4, controller directive 2):
-# resolve_props's returned 8-key dict has no family field, so shrinkage
-# screening maps the ALLOY GRADE NAME to one of src.shrinkage.SHRINKAGE_PCT's
-# family keys via a small name-prefix helper, rather than crashing or
-# silently guessing on an unrecognized grade.
-# --------------------------------------------------------------------------- #
-def test_resolve_alloy_family_known_prefixes():
-    assert resolve_alloy_family("EN-GJL-250") == ("grey_iron", False)
-    assert resolve_alloy_family("EN-GJL-200") == ("grey_iron", False)
-    assert resolve_alloy_family("EN-GJS-400-15") == ("ductile_iron", False)
-    assert resolve_alloy_family("GS-38 (GE200)") == ("low_alloy_steel", False)
-    assert resolve_alloy_family("GS-45 (GP240GH)") == ("low_alloy_steel", False)
-    assert resolve_alloy_family("G20Mn5") == ("low_alloy_steel", False)
-    assert resolve_alloy_family("G17CrMo5-5") == ("low_alloy_steel", False)
 
 
 def test_resolve_alloy_family_default_alloy_when_none():
@@ -95,22 +79,12 @@ def test_resolve_alloy_family_unknown_prefix_falls_back_loud():
     assert family == "steel" and assumed is True
 
 
-def test_resolve_alloy_family_props_json_always_assumed_steel():
-    # A custom --props JSON bypasses the named-material table entirely -- no
-    # grade name to map from -- so the documented fallback is "steel",
-    # flagged as assumed regardless of what `alloy` happens to be.
-    family, assumed = resolve_alloy_family("EN-GJL-250", props_json="/some/path.json")
-    assert family == "steel" and assumed is True
 
 
-def test_resolve_alloy_family_every_mapped_family_is_a_known_shrinkage_pct_key():
-    for grade in ("EN-GJL-250", "EN-GJS-400-15", "GS-38 (GE200)", "unknown"):
-        family, _ = resolve_alloy_family(grade)
-        assert family in SHRINKAGE_PCT
 
 
 def test_resolve_alloy_family_covers_every_catalog_grade_exactly():
-    """Review round 1, finding 6: a data-driven guard over the REAL property
+    """a data-driven guard over the REAL property
     DB (`data/properties/materials.csv` via `list_alloys()`) -- every grade
     actually on file today must be an EXACT prefix match (`assumed is
     False`), not a fallback. This is the loud-failure trip-wire for a

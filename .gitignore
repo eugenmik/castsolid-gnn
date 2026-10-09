@@ -1,17 +1,12 @@
-# Raw and derived data are large. Keep only the small public property tables.
+# Data stays out of the repository except the property tables.
 data/*
 !data/properties/
-!data/properties/*.csv
-# Training artifacts, checkpoints, logs
+!data/properties/*
+# Published model weights (download from Hugging Face, see README)
+weights/
+# Prediction output and the mesh cache
 runs/
-# Model checkpoints anywhere
-*.pt
-# SDD scratch (progress ledger, briefs, review packages)
-.superpowers/
 # Python
 __pycache__/
 *.pyc
-.ipynb_checkpoints/
 .pytest_cache/
-# Published model weights (download from Hugging Face, see README)
-weights/

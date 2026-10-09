@@ -1,8 +1,8 @@
-"""Parser for gmsh 2.2 ASCII meshes used by the Foundry dataset.
+"""Reader for gmsh 2.2 ASCII meshes.
 
-Extracts node coordinates (mm, in node-id order — matches the paired .pt),
-surface triangles grouped by physical name (Cooling/Adiabatic), and volume
-tetrahedra. All connectivity is remapped to 0-based node indices.
+Extracts node coordinates (mm, in the file's node order), surface triangles
+grouped by physical name ("Cooling", optionally "Adiabatic") and volume
+tetrahedra. Connectivity is remapped to 0-based node indices.
 """
 from dataclasses import dataclass
 import numpy as np

@@ -1,5 +1,3 @@
-import json, os
-import pytest
 import src.mesh_cache as mc
 
 def _fake_heal(calls, ok=True, n_nodes=5000):
@@ -55,17 +53,13 @@ def test_failure_not_cached(tmp_path, monkeypatch):
     monkeypatch.setattr(mc, "heal_and_mesh", _fake_heal(calls, ok=False))
     r1 = mc.get_or_mesh(str(step), str(tmp_path / "a.msh"), 8500, cache_dir=str(tmp_path / "c"))
     r2 = mc.get_or_mesh(str(step), str(tmp_path / "b.msh"), 8500, cache_dir=str(tmp_path / "c"))
-    # `_fake_heal` (ok=False) always fails regardless of `defeature`, so each
-    # of the 2 `get_or_mesh` invocations now makes 2 calls under the Task-5
-    # auto-trigger policy (plain, then a defeature=True retry) -- 4 total,
-    # not 2 (pre-Task-5 baseline, before the retry-on-failure policy existed).
+    # `_fake_heal` (ok=False) always fails, so each of the 2 `get_or_mesh`
+    # calls tries twice (plain, then defeature=True): 4 calls in total.
     assert r1["ok"] is False and r2["cache"] == "miss" and len(calls) == 4
 
 # --------------------------------------------------------------------------
-# Task 5: size/failure auto-trigger policy for `defeature=`. Big STEP files
-# (>8 MiB) go straight to a single defeature=True call (no wasted plain
-# attempt on a file already known, empirically, to need it -- see
-# task-5-report.md); smaller files try plain first and retry ONCE with
+# size/failure auto-trigger policy for `defeature=`. Big STEP files
+# (>8 MiB) try defeature=True first; smaller files try plain first and retry ONCE with
 # defeature=True only if the plain attempt fails outright. Either way the
 # returned meta records which `defeature` value actually produced the
 # result and whether a retry happened, and the cache key is untouched by
@@ -168,145 +162,15 @@ def test_tmp_names_are_unique_per_writer(tmp_path):
     assert tmp_a != final + ".tmp" and tmp_b != final + ".tmp"  # no fixed shared name
 
 
-# --------------------------------------------------------------------------
-# Part B Task 4: `keep_solid_id` / `bodies_key` / `post_mesh` (tagged-mesh
-# caching) -- MESH_PIPELINE_VERSION pinned to 3.
-# --------------------------------------------------------------------------
 def test_pipeline_version_pinned_to_3():
     assert mc.MESH_PIPELINE_VERSION == 3
 
 
-def test_mesh_cache_key_changes_with_bodies_key(tmp_path):
-    step = tmp_path / "p.step"; step.write_bytes(b"AAA")
-    k_none = mc.mesh_cache_key(str(step), 8500)
-    k_default = mc.mesh_cache_key(str(step), 8500, bodies_key="none")
-    k_other = mc.mesh_cache_key(str(step), 8500, bodies_key="somehash")
-    assert k_none == k_default            # "none" is the implicit default
-    assert k_other != k_none
 
 
-def test_get_or_mesh_forwards_keep_solid_id_to_heal_and_mesh(tmp_path, monkeypatch):
-    step = tmp_path / "p.step"; step.write_bytes(b"body-bytes")
-    calls = []
-
-    def fake(step_path, out_msh, target_nodes=8500, defeature=False, keep_solid_id=None, **kw):
-        calls.append({"keep_solid_id": keep_solid_id, "defeature": defeature})
-        with open(out_msh, "w") as f:
-            f.write("MESH 42")
-        return {"ok": True, "n_nodes": 42, "notes": ""}
-
-    monkeypatch.setattr(mc, "heal_and_mesh", fake)
-    r = mc.get_or_mesh(str(step), str(tmp_path / "a.msh"), 8500, cache_dir=str(tmp_path / "c"),
-                       keep_solid_id=7, bodies_key="rolehash1")
-    assert len(calls) == 1 and calls[0]["keep_solid_id"] == 7
-    assert r["cache"] == "miss" and r["n_nodes"] == 42
-
-    # A different keep_solid_id / bodies_key must miss the same cache_dir
-    # (different key), calling heal_and_mesh again.
-    r2 = mc.get_or_mesh(str(step), str(tmp_path / "b.msh"), 8500, cache_dir=str(tmp_path / "c"),
-                        keep_solid_id=9, bodies_key="rolehash2")
-    assert len(calls) == 2 and calls[1]["keep_solid_id"] == 9
 
 
-def test_get_or_mesh_post_mesh_hook_runs_on_miss_before_store_and_merges_into_meta(
-        tmp_path, monkeypatch):
-    step = tmp_path / "p.step"; step.write_bytes(b"tag-bytes")
-    heal_calls = []
-    post_calls = []
-
-    def fake_heal(step_path, out_msh, target_nodes=8500, defeature=False, keep_solid_id=None, **kw):
-        heal_calls.append(1)
-        with open(out_msh, "w") as f:
-            f.write("UNTAGGED")
-        return {"ok": True, "n_nodes": 10, "notes": ""}
-
-    def fake_post_mesh(out_msh):
-        post_calls.append(out_msh)
-        # simulate tag_contact_patches rewriting the mesh in place
-        with open(out_msh, "a") as f:
-            f.write(" TAGGED")
-        return {"per_body_patch_area_mm2": {2: 12.5}, "n_adiab_tris": 3}
-
-    monkeypatch.setattr(mc, "heal_and_mesh", fake_heal)
-    out1 = str(tmp_path / "a.msh")
-    r1 = mc.get_or_mesh(str(step), out1, 8500, cache_dir=str(tmp_path / "c"),
-                        keep_solid_id=1, bodies_key="bh1", post_mesh=fake_post_mesh)
-
-    assert len(post_calls) == 1 and post_calls[0] == out1
-    assert r1["cache"] == "miss"
-    assert r1["per_body_patch_area_mm2"] == {2: 12.5}
-    assert r1["n_adiab_tris"] == 3
-    assert open(out1).read() == "UNTAGGED TAGGED"   # tagged version was stored
-
-    # A cache HIT returns the already-tagged mesh + merged meta, WITHOUT
-    # calling post_mesh (or heal_and_mesh) again.
-    out2 = str(tmp_path / "b.msh")
-    r2 = mc.get_or_mesh(str(step), out2, 8500, cache_dir=str(tmp_path / "c"),
-                        keep_solid_id=1, bodies_key="bh1", post_mesh=fake_post_mesh)
-    assert r2["cache"] == "hit"
-    assert len(post_calls) == 1                      # not called again
-    assert len(heal_calls) == 1                       # not re-meshed
-    # NOTE: a JSON round-trip through the on-disk cache turns dict int keys
-    # into strings (json.dump has no int-key mode) -- a cache HIT's
-    # per_body_patch_area_mm2 keys are therefore str, not int, unlike a
-    # fresh MISS's. Callers (predict_casting) normalize back to int.
-    assert r2["per_body_patch_area_mm2"] == {"2": 12.5}
-    assert open(out2).read() == "UNTAGGED TAGGED"     # tagged mesh served from cache
 
 
-def test_get_or_mesh_no_bodies_key_or_post_mesh_is_byte_identical_to_before(tmp_path, monkeypatch):
-    """Back-compat: omitting keep_solid_id/bodies_key/post_mesh entirely
-    must behave exactly as before this task (aside from the version-bump
-    key change already covered above)."""
-    step = tmp_path / "p.step"; step.write_bytes(b"plain-bytes")
-    calls = []
-    monkeypatch.setattr(mc, "heal_and_mesh", _fake_heal(calls))
-    r1 = mc.get_or_mesh(str(step), str(tmp_path / "a.msh"), 8500, cache_dir=str(tmp_path / "c"))
-    r2 = mc.get_or_mesh(str(step), str(tmp_path / "b.msh"), 8500, cache_dir=str(tmp_path / "c"))
-    assert r1["cache"] == "miss" and r2["cache"] == "hit"
-    assert "per_body_patch_area_mm2" not in r2
 
 
-def test_get_or_mesh_post_mesh_exception_propagates_and_stores_nothing(tmp_path, monkeypatch):
-    """Review fix (LOW): if `post_mesh` raises (e.g. `tag_contact_patches`
-    finds an empty/all-covering patch), `get_or_mesh` must propagate the
-    exception AND must not have stored anything under that cache key --
-    a subsequent call re-meshes (and re-runs post_mesh) from scratch,
-    rather than silently caching an untagged mesh under a bodies-aware key."""
-    step = tmp_path / "p.step"; step.write_bytes(b"boom-bytes")
-    cache_dir = str(tmp_path / "c")
-    heal_calls = []
-
-    def fake_heal(step_path, out_msh, target_nodes=8500, defeature=False, keep_solid_id=None, **kw):
-        heal_calls.append(1)
-        with open(out_msh, "w") as f:
-            f.write("UNTAGGED")
-        return {"ok": True, "n_nodes": 10, "notes": ""}
-
-    def failing_post_mesh(out_msh):
-        raise ValueError("body 2 does not touch the casting")
-
-    monkeypatch.setattr(mc, "heal_and_mesh", fake_heal)
-
-    with pytest.raises(ValueError, match="does not touch"):
-        mc.get_or_mesh(str(step), str(tmp_path / "a.msh"), 8500, cache_dir=cache_dir,
-                       keep_solid_id=1, bodies_key="bh-boom", post_mesh=failing_post_mesh)
-
-    assert len(heal_calls) == 1
-    # Nothing was stored under this key -- no .msh/.json for it in cache_dir.
-    key = mc.mesh_cache_key(str(step), 8500, bodies_key="bh-boom")
-    assert not os.path.exists(os.path.join(cache_dir, f"{key}.msh"))
-    assert not os.path.exists(os.path.join(cache_dir, f"{key}.json"))
-
-    # A subsequent call re-meshes (and re-runs post_mesh) from scratch --
-    # this time succeeding -- rather than serving a stale/partial entry.
-    ok_calls = []
-
-    def ok_post_mesh(out_msh):
-        ok_calls.append(out_msh)
-        return {"per_body_patch_area_mm2": {2: 5.0}, "n_adiab_tris": 1}
-
-    r2 = mc.get_or_mesh(str(step), str(tmp_path / "b.msh"), 8500, cache_dir=cache_dir,
-                        keep_solid_id=1, bodies_key="bh-boom", post_mesh=ok_post_mesh)
-    assert len(heal_calls) == 2 and len(ok_calls) == 1
-    assert r2["cache"] == "miss" and r2["per_body_patch_area_mm2"] == {2: 5.0}

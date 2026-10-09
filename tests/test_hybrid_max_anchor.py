@@ -1,11 +1,6 @@
-"""Task 2/7: max/quantile-anchor hybrid recomposition, in src/hybrid.py.
+"""max/quantile-anchor hybrid recomposition, in src/hybrid.py.
 
-See src/evaluate_ft2b.py's module docstring ("v4 hybrid recomposition:
-MAX-anchor, not MEAN-anchor") for why this differs from hybrid_field's
-MEAN-anchor. This module is the single source; evaluate_ft2b re-exports it
-under its old private name via an alias import.
-
-Task 7: the exact-max anchor is fragile to a handful of outlier nodes (one
+The exact-max anchor is fragile to a handful of outlier nodes (one
 inflated GNN log-space prediction can drag the entire rest of the field
 below the zero clip). The anchor moved to a high quantile
 (`np.quantile(gnn, q)`, default `q=0.995`); `q=1.0` reproduces the old
@@ -17,7 +12,7 @@ from src.hybrid import hybrid_field_max_anchor
 
 
 def test_max_anchor_q1_sets_exact_max_and_preserves_shape():
-    """q=1.0 regression pin: reproduces the pre-Task-7 exact-max behavior."""
+    """q=1.0 regression pin: reproduces the earlier exact-max behavior."""
     g = np.array([1.0, 4.0, 2.5])
     out = hybrid_field_max_anchor(g, 10.0, q=1.0)
     assert out.max() == 10.0
@@ -37,13 +32,10 @@ def test_max_anchor_clips_at_zero():
     assert hybrid_field_max_anchor(np.array([0.0, 100.0]), 10.0)[0] == 0.0
 
 
-def test_evaluate_ft2b_uses_the_same_function():
-    from src import evaluate_ft2b, hybrid
-    assert evaluate_ft2b._max_anchor_hybrid is hybrid.hybrid_field_max_anchor
 
 
 def test_max_anchor_q1_reproduces_old_exact_max_on_random_vector():
-    """Regression pin: q=1.0 bit-for-bit equals the pre-Task-7 formula
+    """Regression pin: q=1.0 bit-for-bit equals the earlier formula
     `clip(g - g.max() + total, 0, None)` on an arbitrary random vector."""
     rng = np.random.default_rng(42)
     g = rng.normal(loc=50.0, scale=20.0, size=200)

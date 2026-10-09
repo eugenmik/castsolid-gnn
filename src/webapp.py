@@ -1,5 +1,5 @@
-"""Local trame + PyVista web app: upload a STEP casting, run the Phase 2A hybrid
-prediction, and view the solidification field with a time slider (solidified =
+"""Local trame + PyVista web app: upload a STEP casting, run the prediction,
+and view the solidification field with a time slider (solidified =
 ghost, liquid = opaque) and a hot-spot toggle. Run: python -m src.webapp
 
 A multi-solid STEP is meshed through the same prep pipeline as the CLI, which

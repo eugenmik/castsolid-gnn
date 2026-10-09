@@ -1,33 +1,7 @@
-"""Out-of-distribution size check: compare a casting's scale quantities against
-the training-set maxima so predictions beyond the training envelope are flagged."""
+"""Out-of-distribution size check: compare a casting's volume, bounding-box
+diagonal and largest distance to cooling with the training maxima
+(`weights/ood_ranges.json`) and warn when any of them is exceeded."""
 import json
-import os.path as osp
-from glob import glob
-
-import numpy as np
-
-from src.features import FEATURE_NAMES
-
-_VOL = FEATURE_NAMES.index("volume_mm3")
-_GC = FEATURE_NAMES.index("geodesic_d_cool")
-
-
-def build_ood_ranges(features_dir: str) -> dict:
-    vol_max = bbox_max = gc_max = 0.0
-    for p in glob(osp.join(features_dir, "graphs", "*.npz")):
-        d = np.load(p)
-        X, pos = d["X"], d["pos"]
-        vol_max = max(vol_max, float(X[0, _VOL]))
-        gc_max = max(gc_max, float(X[:, _GC].max()))
-        diag = float(np.linalg.norm(pos.max(0) - pos.min(0)))
-        bbox_max = max(bbox_max, diag)
-    return {"volume_mm3_max": vol_max, "bbox_diag_max": bbox_max,
-            "geodesic_d_cool_max": gc_max}
-
-
-def save_ranges(ranges: dict, path: str):
-    with open(path, "w") as f:
-        json.dump(ranges, f, indent=2)
 
 
 def load_ranges(path: str) -> dict:
