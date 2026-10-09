@@ -1,52 +1,67 @@
-# Casting Solidification GNN
+# Casting solidification GNN
 
-A graph neural network surrogate for **rapid solidification screening** of metal castings.
-Given a STEP model, alloy and mold condition, the pipeline predicts a per-node
-solidification-time field and identifies the last-to-solidify regions.
+A graph neural network surrogate for screening how metal castings solidify. Given a STEP
+model, an alloy and a mold condition, the pipeline predicts the solidification time at every
+mesh node and marks the regions that freeze last.
 
-It is designed to provide an early engineering estimate before a full simulation study.
-It is **not** a replacement for a calibrated process simulation or physical validation.
-Hot spots are indicators of feeding difficulty and shrinkage risk; they are not direct
-porosity labels.
+It gives an engineering estimate early in design, before anyone sets up a full simulation. It
+does not replace a calibrated process simulation or physical validation. Hot spots mark feeding
+difficulty and shrinkage risk; they are not porosity labels.
 
 <p align="center">
   <img src="assets/solidification.gif" alt="Predicted solidification playback" width="720"><br>
-  <em>Predicted solidification playback: already-solidified material becomes translucent while the remaining liquid region contracts toward the hot spot.</em>
+  <em>Predicted solidification playback. Solidified material turns translucent while the
+  remaining liquid contracts toward the hot spot.</em>
 </p>
+
+## Model weights
+
+The trained v5.1 weights are published on Hugging Face as CastSolid GNN, under Apache-2.0:
+
+**[huggingface.co/eugenmik/castsolid-gnn](https://huggingface.co/eugenmik/castsolid-gnn)**
+
+The Hugging Face repository is self-contained. It has the weights (safetensors and skops, no
+pickles), this source code, the model card with the full evaluation, and a quick start. To run
+predictions from a clone of this GitHub repository instead, download the weights into
+`weights/`:
+
+```bash
+hf download eugenmik/castsolid-gnn --include "weights/*" --local-dir .
+```
 
 ## Current status
 
-- Production model stack: **v5.1 hybrid**, frozen July 31, 2026.
-- Inputs: STEP geometry in millimeters, named alloy and mold properties, and optional
-  casting/chill/sleeve body roles.
-- Outputs: per-node solidification time, total time, top-decile hot-spot mask, OOD warnings
-  and a scoped shrinkage-screening layer.
-- Browser workflow: **FoundryFlash**, a working prelaunch prototype for upload, meshing and
-  interactive 3D review. It is not publicly deployed.
-- Intended positioning: **rapid solidification screening** only.
+- The production stack is the v5.1 hybrid, frozen on 31 July 2026.
+- Inputs: STEP geometry in millimetres, a named alloy and mold, and optional roles for casting,
+  chill and sleeve bodies.
+- Outputs: solidification time per node, total time, a top-decile hot-spot mask, OOD warnings
+  and a shrinkage screening layer with an explicit confidence label.
+- A local browser viewer (`python -m src.webapp`) handles upload, meshing and interactive 3D
+  review. FoundryFlash, a prelaunch browser prototype built on the same stack, is not publicly deployed.
 
-## Evidence, separated by evaluation regime
+## Evidence, split by evaluation regime
 
-Results from different datasets are not interchangeable. The small primitive regime and the
-later real-geometry evaluation have very different time scales.
+Numbers from different datasets cannot be compared directly. The primitive regime and the
+later real-geometry evaluation work on very different time scales.
 
-| Evaluation | n | Nodal MAE | Hot-spot overlap | What it establishes |
+| Evaluation | n | Nodal MAE | Hot-spot overlap | What it shows |
 |---|---:|---:|---:|---|
-| Held-out primitive geometry families | family split | **4.26 s** | **0.917** | Generalization across unseen synthetic shape families in the original regime |
-| Unseen real, single-body casting geometry | 6 | **80.3 s median** | **0.738 median** | Geometry generalization against a shared-mesh FEniCSx reference |
-| Unseen real sleeve assemblies | 2 | **443.7 s median** | **0.932 median** | Good hot-region ranking, but excessive field smoothing and poor absolute calibration |
+| Held-out primitive geometry families | family split | 4.26 s | 0.917 | Generalization to unseen synthetic shape families in the original regime |
+| Unseen real single-body castings | 6 | 80.3 s median | 0.738 median | Generalization to new real geometry against a FEniCSx reference on the same mesh |
+| Unseen real sleeve assemblies | 2 | 443.7 s median | 0.932 median | Hot regions rank well, but the field is too smooth and the absolute times are off |
 
-The real-geometry study started with 10 production casting CAD models. Two could not be
-meshed because of self-intersecting B-reps, leaving eight scored parts. One single-body part
-had only **0.035** hot-spot overlap, so the median must not be read as a guarantee.
+The real-geometry study started from 10 production CAD models. Two could not be meshed because
+of self-intersecting B-reps, which left eight scored parts. One single-body part reached a
+hot-spot overlap of only 0.035, so the median is not a guarantee for any single part.
 
 > [!IMPORTANT]
-> Training and real-geometry reference fields share the same FEniCSx heat-transfer model,
-> material database and boundary assumptions. These results measure surrogate generalization
-> to new geometry. They do **not** establish physical accuracy against instrumented castings.
+> Training data and real-geometry references come from the same FEniCSx heat-transfer model,
+> material database and boundary assumptions. These results measure how well the surrogate
+> carries over to new geometry. They do not show physical accuracy against instrumented
+> castings.
 
-Hot-spot overlap is the overlap of the predicted and reference top 10% latest-solidifying
-nodes. A value of 1.0 means the two node sets coincide.
+Hot-spot overlap compares the 10% of nodes that solidify last in the prediction and in the
+reference. A value of 1.0 means the two sets are identical.
 
 ## How v5.1 works
 
@@ -64,117 +79,119 @@ flowchart LR
   F --> G[VTU / browser viewer]
 ```
 
-The graph network follows the encode-process-decode pattern introduced by
-[MeshGraphNets](https://arxiv.org/abs/2010.03409). Mesh edges and nearby-node connections
-form a union graph. Twelve message-passing blocks with hidden width 128 predict the spatial
-field pattern.
+The graph network uses the encode-process-decode design from
+[MeshGraphNets](https://arxiv.org/abs/2010.03409). Mesh edges and k-nearest-neighbour edges
+together form a union graph, and twelve message-passing blocks with hidden width 128 predict the
+spatial pattern of the field.
 
-The graph network alone is not the production predictor. Two
-`HistGradientBoostingRegressor` heads estimate total solidification time and field spread.
-`src/hybrid.py::hybrid_field_soft` maps the GNN field to those two graph-level targets while
-clipping negative time. The production weights are `w_total=1.0` and `w_std=4.0`.
+The GNN is not the predictor on its own. Two `HistGradientBoostingRegressor` heads estimate the
+total solidification time and the spread of the field. `src/hybrid.py::hybrid_field_soft` fits
+the GNN field to both targets and clips negative times, with weights `w_total=1.0` and
+`w_std=4.0`.
 
 ### Features and conditioning
 
-The v5.1 checkpoint consumes 15 per-node features:
+The v5.1 checkpoint reads 15 features per node:
 
 - distance through the mesh to cooling and adiabatic boundaries;
 - surface, interior, cooling and adiabatic flags;
-- global volume, surface area and cooling-area fraction;
-- local volume-to-surface measures at 5, 15 and 40 mm radii;
-- boundary-extraction and exothermic-influence channels.
+- part volume, surface area and cooling-area fraction;
+- local volume-to-surface ratios at radii of 5, 15 and 40 mm;
+- a chill heat-extraction channel and an exothermic-sleeve channel.
 
-A five-value graph vector conditions the network on alloy and boundary properties through
-FiLM layers. The public tables contain 12 named iron and steel grades, two mold labels and
-example chill/sleeve inputs. The two mold rows currently share the same interim thermal
-properties; selecting between them does not yet change a prediction.
+A vector of five numbers describes the alloy and the boundary, and conditions the network
+through FiLM layers. The public tables hold 12 named iron and steel grades, two mold labels and
+example chill and sleeve inputs. The two mold rows share the same interim thermal properties for
+now, so choosing between them does not change a prediction.
 
 ## Data
 
-Development began with **9,710** thermal simulations across **42** geometry families. A
-later **4,727-case** dataset expanded the problem to multiple alloys and boundary-condition
-regimes, including sand cooling, chills and sleeves. Reference fields were generated with
-[FEniCSx](https://fenicsproject.org/) using an enthalpy-based conduction model with latent
-heat.
+Development started with 9,710 thermal simulations across 42 geometry families. A later set of
+4,727 cases added multiple alloys and boundary regimes (sand cooling, chills and sleeves), and
+500 more cases put virtual chill and sleeve patches on real part geometry. All reference fields
+were generated with [FEniCSx](https://fenicsproject.org/) using an enthalpy-based conduction
+model with latent heat.
 
-The repository does not include the raw simulation corpus or trained weights. The public
-source is a curated implementation snapshot for technical review; inference requires the
-matching private model package.
+<p align="center">
+  <img src="assets/3dforms.png" alt="Examples of primitive training geometries" width="640">
+</p>
 
-## The data-recovery lesson
+Neither this repository nor the Hugging Face release contains the raw simulation corpus.
 
-The most consequential defect was not in the neural network. Solver temperatures were in
-degree-of-freedom order, while coordinates and geometric features were in gmsh node order.
-About 60% of nodal targets were silently attached to the wrong positions.
+## The node-order bug
 
-The recovery scripts in [`tools/recovery/`](tools/recovery/) reconstruct the permutation
-between those orderings, and `src/build_dataset.py` applies it while building graph data.
-For simulation-to-ML work, this is the key lesson: verify local data identity across every
-solver/mesh interface before tuning a model.
+The worst defect in the project was not in the neural network. Solver temperatures were stored
+in degree-of-freedom order, while coordinates and geometric features were in gmsh node order.
+About 60% of the nodal targets were silently attached to the wrong positions.
+
+The recovery scripts in [`tools/recovery/`](tools/recovery/) rebuild the permutation between the
+two orderings, and `src/build_dataset.py` applies it when it builds the graph data. If you work
+on simulation-to-ML pipelines, check node identity across every solver and mesh interface before
+you tune a model.
 
 ## Repository map
 
 ```text
 src/
   model_gnn.py          GNN, FiLM and optional derivative heads
-  features.py           v2-v5 geometry and boundary features
-  hybrid.py             scale/spread recomposition
+  features.py           v2 to v5 geometry and boundary features
+  hybrid.py             scale and spread recomposition
   predict_casting.py    STEP-to-field orchestration
+  release_io.py         safetensors/skops loading of the published weights
   assembly.py           multi-body roles and contact patches
-  shrinkage.py          scoped post-processing and confidence flags
+  shrinkage.py          shrinkage screening and confidence flags
   mesh_cache.py         content-addressed meshing cache
   train_*.py            training and fine-tuning entry points
 tools/
   recovery/             solver-DOF to mesh-node recovery
-  doe/                   public property and density-meshing helpers
-data/properties/         compact public material/BC tables
-tests/                   deterministic public unit tests
+  doe/                  property loader and density-targeted meshing
+  sleeves/              sleeve registry (vendor MEF for real products)
+data/properties/        material, mold, chill and sleeve tables
+tests/                  deterministic unit tests
 ```
 
 ## Installation
 
-Create a Python 3.11 environment, install a PyTorch build suitable for your CPU/CUDA setup,
-then install the remaining dependencies:
+Create a Python 3.11 environment. Install PyTorch 2.3 and the matching `torch-cluster` wheel
+for your CPU or CUDA setup, then the remaining dependencies:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+pip install "torch==2.3.0" --index-url https://download.pytorch.org/whl/cpu
+pip install torch-cluster -f https://data.pyg.org/whl/torch-2.3.0+cpu.html
 pip install -r requirements.txt
-```
-
-Run the public tests:
-
-```bash
 pytest -q
 ```
 
-Current public snapshot: **306 passed, 7 skipped**. The skipped cases require optional
-runtime capabilities unavailable in the basic test environment.
+With the weights in `weights/` (see above), run a prediction:
 
-The committed source paths expect the following private artifacts for v5.1 inference:
-
-```text
-runs/ft3_stage1/ckpt_ep021.pt
-runs/ft3_gbm/hgb_v3.joblib
-runs/ft3_gbm/hgb_std_v2.joblib
-data/features_v2/ood_ranges.json
+```bash
+python -m src.predict_casting path/to/part.step --out-dir out --alloy EN-GJS-500-7
 ```
 
-They are intentionally excluded from this public repository. See [`MODEL_CARD.md`](MODEL_CARD.md)
-for the evaluation scope and operating limits.
+See [`MODEL_CARD.md`](MODEL_CARD.md) for the evaluation scope and operating limits, and the
+[Hugging Face model card](https://huggingface.co/eugenmik/castsolid-gnn) for the
+full description.
 
 ## Practical limits
 
-- Pure conduction with latent heat: no mold filling, fluid flow, gas, stress or distortion.
-- CAD healing and tetrahedral meshing dominate end-to-end latency and may fail on invalid
-  solids. GNN inference itself takes seconds after meshing on the development GPU.
-- OOD checks cover geometry size and distance to cooling, but are not a calibrated uncertainty
+- The physics is conduction with latent heat. There is no mold filling, fluid flow, gas, stress
+  or distortion.
+- CAD healing and tetrahedral meshing take most of the end-to-end time and can fail on invalid
+  solids. Once a part is meshed, GNN inference takes seconds.
+- OOD checks cover part size and distance to cooling. They are not a calibrated uncertainty
   estimate.
-- Assemblies may locate hot regions well while underestimating field contrast.
-- The Niyama-style proxy is marked low-confidence for chill-bearing inputs.
-- Physical validation against measured castings is the next launch-critical study.
+- On assemblies the model can locate the hot regions well while underestimating the contrast of
+  the field.
+- The Niyama proxy is marked low-confidence for inputs with chills.
+- The next study that matters for launch is validation against measured castings.
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE).
 
 ## Author
 
-**Eugen Miknevic** — independent foundry engineer<br>
-Contact: **eugenmiknevic@gmail.com**
+Eugen Miknevic, independent foundry engineer<br>
+Contact: eugenmiknevic@gmail.com

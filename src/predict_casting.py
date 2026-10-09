@@ -130,6 +130,7 @@ from src.gbm_ft2b import (gbm_v2_total_seconds, FEATURE_NAMES as GBM_FEATURE_NAM
 from src.hybrid import hybrid_field, hybrid_field_max_anchor, hybrid_field_soft
 from src.inference_props import resolve_props, DEFAULT_ALLOY, resolve_alloy_family
 from src.shrinkage import screen_casting
+from src.release_io import resolve_artifact, load_gbm, load_gnn_any
 
 N_GBM_V2_FEATURES = len(GBM_FEATURE_NAMES)
 _V4_VOL_IDX = FEATURE_NAMES_V4.index("volume_mm3")
@@ -782,17 +783,18 @@ def load_hybrid(gnn_ckpt, hgb_path, device=None,
     must unpack all 6.
     """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    hgb = joblib.load(hgb_path) if hgb_path is not None else None
-    state = torch.load(gnn_ckpt, map_location=device, weights_only=False) \
-        if isinstance(gnn_ckpt, (str, os.PathLike)) else gnn_ckpt
+    gnn_ckpt, hgb_path = resolve_artifact(gnn_ckpt), resolve_artifact(hgb_path)
+    hgb = load_gbm(hgb_path)
+    state = load_gnn_any(gnn_ckpt, device)
     is_film = state.get("cfg", {}).get("film", False)
 
     if hgb_std_path is _USE_DEFAULT:
         hgb_std_path = DEFAULT_HGB_STD if is_film else None
     elif isinstance(hgb_std_path, str) and hgb_std_path.strip().lower() == "none":
         hgb_std_path = None
+    hgb_std_path = resolve_artifact(hgb_std_path)
     try:
-        hgb_std = joblib.load(hgb_std_path) if hgb_std_path is not None else None
+        hgb_std = load_gbm(hgb_std_path)
     except FileNotFoundError as e:
         raise FileNotFoundError(
             f"GBM std head not found: {hgb_std_path!r}. Since the 2026-07-31 v5 "
@@ -1082,6 +1084,7 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
     # way, SP1 has no BC channel to honor the role assignment at all, so
     # silently proceeding would both report bc_config as if honored AND
     # leave a wrong-physics tagged mesh sitting in the mesh cache.
+    gnn_ckpt, hgb_path = resolve_artifact(gnn_ckpt), resolve_artifact(hgb_path)
     gnn, hgb, norm, cfg, baseline_norm, hgb_std = load_hybrid(
         gnn_ckpt, hgb_path, device, hgb_std_path=hgb_std_path)
     # Provenance label for the summary txt: the RESOLVED std artifact (the
@@ -1090,7 +1093,7 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
     if hgb_std is None:
         hgb_std_path_label = "none"
     elif hgb_std_path is _USE_DEFAULT:
-        hgb_std_path_label = DEFAULT_HGB_STD
+        hgb_std_path_label = resolve_artifact(DEFAULT_HGB_STD)
     else:
         hgb_std_path_label = str(hgb_std_path)
     if plan is not None and not cfg.get("film", False):
@@ -1143,6 +1146,7 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
                                   w_total=w_total, w_std=w_std)
 
     warnings = []
+    ood_json = resolve_artifact(ood_json)
     if osp.exists(ood_json):
         ranges = _ood.load_ranges(ood_json)
         X = feat["X"][:, :N_BASELINE_FEATURES]

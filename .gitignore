@@ -13,3 +13,5 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .pytest_cache/
+# Published model weights (download from Hugging Face, see README)
+weights/

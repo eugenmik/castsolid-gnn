@@ -1,15 +1,21 @@
-numpy>=1.26
+# Install PyTorch 2.3 for your platform first (see README), plus the matching
+# torch-cluster wheel, e.g. for CPU:
+#   pip install "torch==2.3.0" --index-url https://download.pytorch.org/whl/cpu
+#   pip install torch-cluster -f https://data.pyg.org/whl/torch-2.3.0+cpu.html
+numpy>=2.0
 scipy>=1.11
-scikit-learn>=1.5
+scikit-learn==1.5.2
 joblib>=1.3
-torch>=2.3
-torch-geometric>=2.7
-torch-scatter>=2.1
+skops>=0.10
+safetensors>=0.4
+torch-geometric==2.7.0
 gmsh>=4.13
 meshio>=5.3
+pytest>=8.3
+# Optional: local browser viewer (python -m src.webapp)
 pyvista>=0.44
 trame>=3.6
 trame-vtk>=2.8
 trame-vuetify>=2.7
+trame-pyvista>=0.1
 imageio>=2.34
-pytest>=8.3

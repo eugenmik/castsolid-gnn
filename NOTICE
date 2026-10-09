@@ -1,0 +1,9 @@
+Casting Solidification GNN
+Copyright 2026 Eugen Miknevic
+
+This product includes software and trained model weights developed by
+Eugen Miknevic, released under the Apache License, Version 2.0.
+
+The graph network follows the encode-process-decode design of MeshGraphNets
+(Pfaff et al., "Learning Mesh-Based Simulation with Graph Networks", ICLR 2021).
+Reference solidification fields were generated with FEniCSx (dolfinx).
