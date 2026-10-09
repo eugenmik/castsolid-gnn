@@ -19,7 +19,7 @@ from pathlib import Path
 
 from tools.doe.load_properties import load_materials
 
-DEFAULT_ALLOY = "EN-GJL-250"
+DEFAULT_ALLOY = "EN-GJS-400-15"
 
 _REQUIRED_KEYS = ("k", "rho", "cp", "L_kJ_kg", "TL", "TS", "Tpour", "mold_effusivity")
 

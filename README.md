@@ -1,154 +1,64 @@
-# Casting solidification GNN
+# Casting solidification GNN: the pipeline
 
-A graph neural network surrogate for screening how metal castings solidify. Given a STEP
-model, an alloy and a mold condition, the pipeline predicts the solidification time at every
-mesh node and marks the regions that freeze last.
+This repository turns a CAD model of a casting into a predicted solidification field you can
+open in ParaView. It reads a STEP file, heals the geometry, builds a tetrahedral mesh, runs the
+trained surrogate model on that mesh, and writes the field together with hot spots,
+out-of-distribution warnings and a shrinkage screening layer. A small local web viewer does the
+same from a browser.
 
-It gives an engineering estimate early in design, before anyone sets up a full simulation. It
-does not replace a calibrated process simulation or physical validation. Hot spots mark feeding
-difficulty and shrinkage risk; they are not porosity labels.
-
-<p align="center">
-  <img src="assets/solidification.gif" alt="Predicted solidification playback" width="720"><br>
-  <em>Predicted solidification playback. Solidified material turns translucent while the
-  remaining liquid contracts toward the hot spot.</em>
-</p>
-
-## Model weights
-
-The trained v5.1 weights are published on Hugging Face under Apache-2.0:
+The model itself, with its architecture, training data, evaluation and limitations, is published
+and documented on Hugging Face:
 
 **[huggingface.co/eugenmik/castsolid-gnn](https://huggingface.co/eugenmik/castsolid-gnn)**
 
-The Hugging Face repository is self-contained. It has the weights (safetensors and skops, no
-pickles), this source code, the model card with the full evaluation, and a quick start. To run
-predictions from a clone of this GitHub repository instead, download the weights into
-`weights/`:
+<p align="center">
+  <img src="assets/solidification.gif" alt="Predicted solidification playback" width="720"><br>
+  <em>A predicted field played back in the viewer. Solidified material turns translucent while
+  the remaining liquid contracts toward the hot spot.</em>
+</p>
 
-```bash
-hf download eugenmik/castsolid-gnn --include "weights/*" --local-dir .
-```
-
-## Current status
-
-- The production stack is the v5.1 hybrid, frozen on 31 July 2026.
-- Inputs: STEP geometry in millimetres, a named alloy and mold, and optional roles for casting,
-  chill and sleeve bodies.
-- Outputs: solidification time per node, total time, a top-decile hot-spot mask, OOD warnings
-  and a shrinkage screening layer with an explicit confidence label.
-- A local browser viewer (`python -m src.webapp`) handles upload, meshing and interactive 3D
-  review. FoundryFlash, a prelaunch browser prototype built on the same stack, is not publicly deployed.
-
-## Evidence, split by evaluation regime
-
-Numbers from different datasets cannot be compared directly. The primitive regime and the
-later real-geometry evaluation work on very different time scales.
-
-| Evaluation | n | Nodal MAE | Hot-spot overlap | What it shows |
-|---|---:|---:|---:|---|
-| Held-out primitive geometry families | family split | 4.26 s | 0.917 | Generalization to unseen synthetic shape families in the original regime |
-| Unseen real single-body castings | 6 | 80.3 s median | 0.738 median | Generalization to new real geometry against a FEniCSx reference on the same mesh |
-| Unseen real sleeve assemblies | 2 | 443.7 s median | 0.932 median | Hot regions rank well, but the field is too smooth and the absolute times are off |
-
-The real-geometry study started from 10 production CAD models. Two could not be meshed because
-of self-intersecting B-reps, which left eight scored parts. One single-body part reached a
-hot-spot overlap of only 0.035, so the median is not a guarantee for any single part.
-
-> [!IMPORTANT]
-> Training data and real-geometry references come from the same FEniCSx heat-transfer model,
-> material database and boundary assumptions. These results measure how well the surrogate
-> carries over to new geometry. They do not show physical accuracy against instrumented
-> castings.
-
-Hot-spot overlap compares the 10% of nodes that solidify last in the prediction and in the
-reference. A value of 1.0 means the two sets are identical.
-
-## How v5.1 works
+## What the pipeline does
 
 ```mermaid
 flowchart LR
-  A[STEP + process inputs] --> B[CAD healing + tetrahedral mesh]
-  B --> C[15 node features + alloy/BC vector]
-  C --> D1[12-block GNN<br/>field pattern]
-  C --> D2[GBM total head<br/>absolute scale]
-  C --> D3[GBM spread head<br/>field contrast]
-  D1 --> E[Soft-anchor recomposition]
-  D2 --> E
-  D3 --> E
-  E --> F[Time field + hot spots + OOD]
-  F --> G[VTU / browser viewer]
+  A[STEP file, mm] --> B[CAD import + healing<br/>OpenCASCADE via Gmsh]
+  B --> C[Tetrahedral mesh<br/>~8,500 nodes, cached]
+  C --> D[Model<br/>huggingface.co/eugenmik/castsolid-gnn]
+  P[Alloy + mold<br/>data/properties] --> D
+  D --> E[OOD check]
+  D --> F[Shrinkage screening]
+  E --> G[VTU + summary]
+  F --> G
+  G --> H[ParaView / web viewer]
 ```
 
-The graph network uses the encode-process-decode design from
-[MeshGraphNets](https://arxiv.org/abs/2010.03409). Mesh edges and k-nearest-neighbour edges
-together form a union graph, and twelve message-passing blocks with hidden width 128 predict the
-spatial pattern of the field.
-
-The GNN is not the predictor on its own. Two `HistGradientBoostingRegressor` heads estimate the
-total solidification time and the spread of the field. `src/hybrid.py::hybrid_field_soft` fits
-the GNN field to both targets and clips negative times, with weights `w_total=1.0` and
-`w_std=4.0`.
-
-### Features and conditioning
-
-The v5.1 checkpoint reads 15 features per node:
-
-- distance through the mesh to cooling and adiabatic boundaries;
-- surface, interior, cooling and adiabatic flags;
-- part volume, surface area and cooling-area fraction;
-- local volume-to-surface ratios at radii of 5, 15 and 40 mm;
-- a chill heat-extraction channel and an exothermic-sleeve channel.
-
-A vector of five numbers describes the alloy and the boundary, and conditions the network
-through FiLM layers. The public tables hold 12 named iron and steel grades, two mold labels and
-example chill and sleeve inputs. The two mold rows share the same interim thermal properties for
-now, so choosing between them does not change a prediction.
-
-## Data
-
-Development started with 9,710 thermal simulations across 42 geometry families. A later set of
-4,727 cases added multiple alloys and boundary regimes (sand cooling, chills and sleeves), and
-500 more cases put virtual chill and sleeve patches on real part geometry. All reference fields
-were generated with [FEniCSx](https://fenicsproject.org/) using an enthalpy-based conduction
-model with latent heat.
-
-<p align="center">
-  <img src="assets/3dforms.png" alt="Examples of primitive training geometries" width="640">
-</p>
-
-Neither this repository nor the Hugging Face release contains the raw simulation corpus.
-
-## The node-order bug
-
-The worst defect in the project was not in the neural network. Solver temperatures were stored
-in degree-of-freedom order, while coordinates and geometric features were in gmsh node order.
-About 60% of the nodal targets were silently attached to the wrong positions.
-
-The recovery scripts in [`tools/recovery/`](tools/recovery/) rebuild the permutation between the
-two orderings, and `src/build_dataset.py` applies it when it builds the graph data. If you work
-on simulation-to-ML pipelines, check node identity across every solver and mesh interface before
-you tune a model.
-
-## Repository map
-
-```text
-src/
-  model_gnn.py          GNN, FiLM and optional derivative heads
-  features.py           v2 to v5 geometry and boundary features
-  hybrid.py             scale and spread recomposition
-  predict_casting.py    STEP-to-field orchestration
-  release_io.py         safetensors/skops loading of the published weights
-  assembly.py           multi-body roles and contact patches
-  shrinkage.py          shrinkage screening and confidence flags
-  mesh_cache.py         content-addressed meshing cache
-  train_*.py            training and fine-tuning entry points
-tools/
-  recovery/             solver-DOF to mesh-node recovery
-  doe/                  property loader and density-targeted meshing
-  sleeves/              sleeve registry (vendor MEF for real products)
-data/properties/        material, mold, chill and sleeve tables
-tests/                  deterministic unit tests
-```
+1. CAD import and healing (`tools/doe/prep_parts.py`). The STEP file is read through Gmsh's
+   OpenCASCADE kernel. If it holds several solids, the largest one is kept as the casting, and
+   the geometry goes through a healing pass before meshing.
+2. Meshing (`tools/doe/prep_parts.py`, `src/mesh_cache.py`). Gmsh builds a tetrahedral mesh.
+   The element size is searched until the mesh has about 8,500 nodes, the density the model was
+   trained on. The whole outer surface is tagged `Cooling`, meaning it cools into a green-sand
+   mold. Meshes are cached in `runs/mesh_cache/`, keyed on a hash of the STEP file, the target
+   node count and the meshing pipeline version, so a second run on the same file skips this
+   step.
+3. Prediction (`src/model_api.py`, `src/predict_casting.py`). The model reads the mesh and
+   the alloy and mold properties and returns the solidification time of every node.
+4. Out-of-distribution check (`src/ood.py`). The part's volume, size and largest distance
+   to a cooling surface are compared with the training envelope, and a warning is written for
+   anything outside it.
+5. Shrinkage screening (`src/shrinkage.py`). The predicted field is post-processed into a
+   time-based Niyama proxy and a porosity-risk mask, macro-shrinkage regions (hot regions that
+   liquid can no longer reach), gravity-aware sinks and feeder modulus suggestions. It adds
+   about half a second per part.
+6. Output (`src/predict_casting.py`). Three files land in the output directory:
+   - `<name>.vtu`: the mesh with point fields `solidification_time` (s), `hotspot` (the 10% of
+     nodes that solidify last), `niyama`, `porosity_risk` and `macro_region_id`;
+   - `<name>_summary.txt`: total time, the five latest-solidifying points, OOD warnings and
+     the screening summary;
+   - `<name>.msh`: the mesh that was used.
+7. Web viewer (`src/webapp.py`, `src/viz.py`). A local trame and PyVista app: upload a STEP
+   file, pick the alloy, then scrub a time slider (solidified material turns translucent),
+   toggle the hot spots, or export a solidification GIF from the current camera angle.
 
 ## Installation
 
@@ -164,32 +74,136 @@ pip install -r requirements.txt
 pytest -q
 ```
 
-With the weights in `weights/` (see above), run a prediction:
+For a GPU build, replace `cpu` with your CUDA tag (for example `cu121`) in both URLs.
+
+Then download the model weights from Hugging Face into `weights/`:
 
 ```bash
-python -m src.predict_casting path/to/part.step --out-dir out --alloy EN-GJS-500-7
+hf download eugenmik/castsolid-gnn --include "weights/*" --local-dir .
 ```
 
-See [`MODEL_CARD.md`](MODEL_CARD.md) for the evaluation scope and operating limits, and the
-[Hugging Face model card](https://huggingface.co/eugenmik/castsolid-gnn) for the
-full description.
+### Gmsh
+
+The meshing step uses [Gmsh](https://gmsh.info/) through its Python API. `requirements.txt`
+installs the official `gmsh` wheel from PyPI (about 90 MB). It already contains the OpenCASCADE
+kernel that reads and heals STEP files, so no separate Gmsh or OpenCASCADE installation is
+needed.
+
+On Linux the wheel links against some X11 and OpenGL libraries even when it runs without a
+display. Desktop systems have them already. On a minimal server or container, install them
+first, for example on Debian or Ubuntu:
+
+```bash
+sudo apt-get install libglu1-mesa libgl1 libxrender1 libxcursor1 libxft2 libxinerama1 libfontconfig1
+```
+
+Gmsh is licensed under the GNU GPL v2 or later. This repository calls it as an external
+dependency and does not redistribute it.
+
+## Usage
+
+### Command line
+
+```bash
+python -m src.predict_casting path/to/part.step --out-dir out                 # EN-GJS-400-15
+python -m src.predict_casting path/to/part.step --out-dir out --alloy G20Mn5  # cast steel
+python -m src.predict_casting path/to/part.step --props my_alloy.json        # custom alloy
+```
+
+Useful options:
+
+- `--alloy` picks a row of `data/properties/materials.csv` (`EN-GJS-400-15` by default, or
+  `G20Mn5`); `--mold` picks a row of `molds.csv` (`green_sand`).
+- `--props my_alloy.json` replaces both with your own values. The file needs exactly the keys
+  `k`, `rho`, `cp`, `L_kJ_kg`, `TL`, `TS`, `Tpour` and `mold_effusivity` (SI units,
+  temperatures in °C).
+- `--gravity x,y,z` sets the gravity direction for sink and feeder placement (default
+  `0,0,-1`).
+- `--no-shrinkage` skips the shrinkage screening.
+- `--elem-size` meshes with a fixed element size in mm instead of the density search. The
+  result is then outside the density the model was trained on.
+
+### Python
+
+```python
+from src.predict_casting import predict_casting
+
+r = predict_casting("part.step", out_dir="out", alloy="G20Mn5")
+r["total_time_s"]      # total solidification time, s
+r["hotspot_xyz"]       # (5, 3) coordinates in mm of the latest-solidifying points
+r["ood_warnings"]      # empty when the part is inside the training envelope
+r["shrinkage"]         # screening summary
+r["vtu"], r["summary"] # output file paths
+```
+
+If you already have a mesh in gmsh 2.2 format with the cooling surface tagged, you can skip the
+CAD steps and call the model directly with `src.model_api.CastSolidModel`; the Hugging Face model
+card shows how.
+
+### Web viewer
+
+```bash
+python -m src.webapp          # http://localhost:8080
+```
+
+## Runtime
+
+Healing and meshing take most of the time, from seconds to a few minutes for typical parts.
+The prediction and the screening themselves take seconds. Very large or very detailed STEP files, with
+thousands of small faces, can run past the meshing time limit.
+
+## Recovering solver node order
+
+The training data for the model came from FEniCSx, and the worst defect in the project lived in
+the data pipeline, not the network. The solver stored temperatures in dolfinx degree-of-freedom
+order, while coordinates and geometric features were in gmsh node order. About 60% of the nodal
+targets were silently attached to the wrong positions.
+
+The scripts in [`tools/recovery/`](tools/recovery/) rebuild the permutation between the two
+orderings, and `src/build_dataset.py` applies it when it builds graph data. If you connect a
+solver to an ML pipeline, check node identity across every solver and mesh interface before you
+tune a model.
+
+## Repository map
+
+```text
+src/
+  predict_casting.py    STEP-to-result orchestration and CLI
+  model_api.py          mesh-in, field-out model interface
+  release_io.py         loading of the published weights (safetensors, skops)
+  step_mesh.py          fixed-size Gmsh meshing (--elem-size)
+  mesh_cache.py         content-addressed mesh cache
+  msh_parse.py          gmsh 2.2 reader
+  features.py           node features computed from the mesh
+  ood.py                training-envelope check
+  shrinkage.py          shrinkage screening
+  inference_props.py    alloy and mold lookup
+  webapp.py, viz.py     local browser viewer
+  build_dataset.py, train_*.py   dataset building and training code
+tools/
+  doe/prep_parts.py     CAD healing and density-targeted meshing
+  doe/load_properties.py  property table loader
+  recovery/             solver-DOF to mesh-node recovery
+  export_release.py     conversion of internal checkpoints to the published formats
+data/properties/        alloy and mold tables
+tests/                  deterministic unit tests
+```
 
 ## Practical limits
 
-- The physics is conduction with latent heat. There is no mold filling, fluid flow, gas, stress
-  or distortion.
-- CAD healing and tetrahedral meshing take most of the end-to-end time and can fail on invalid
-  solids. Once a part is meshed, GNN inference takes seconds.
-- OOD checks cover part size and distance to cooling. They are not a calibrated uncertainty
-  estimate.
-- On assemblies the model can locate the hot regions well while underestimating the contrast of
-  the field.
-- The Niyama proxy is marked low-confidence for inputs with chills.
-- The next study that matters for launch is validation against measured castings.
+- STEP files must be in millimetres; units are not detected.
+- STL is not supported, because healing and surface tagging need a B-rep.
+- Invalid B-reps, for example self-intersecting solids, can fail to mesh.
+- The pipeline handles one casting cooling into a green-sand mold over its whole outer
+  surface. If a STEP file holds several solids, only the largest one is used.
+- The physics behind the predictions is conduction with latent heat. There is no mold filling,
+  flow, gas, stress or distortion. Accuracy and limits of the model itself are on the
+  [Hugging Face model card](https://huggingface.co/eugenmik/castsolid-gnn).
 
 ## License
 
-Apache License 2.0, see [LICENSE](LICENSE).
+Apache License 2.0, see [LICENSE](LICENSE). Gmsh, used for meshing, is a separate GPL-licensed
+project.
 
 ## Author
 

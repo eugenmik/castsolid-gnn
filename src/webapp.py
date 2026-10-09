@@ -2,11 +2,8 @@
 prediction, and view the solidification field with a time slider (solidified =
 ghost, liquid = opaque) and a hot-spot toggle. Run: python -m src.webapp
 
-Part B Task 5 adds an assembly mode: a multi-solid STEP upload shows a body
-table (role + params per solid) and a role-colored 3-D preview instead of
-auto-running the prediction; a single-solid upload keeps the original flow
-untouched."""
-import csv
+A multi-solid STEP is meshed through the same prep pipeline as the CLI, which
+keeps the largest solid as the casting."""
 import os
 import os.path as osp
 
@@ -18,13 +15,10 @@ from trame.widgets import html, vuetify3
 from pyvista.trame.ui import plotter_ui
 
 from src import viz
-from src.assembly import list_solids, validate_bodies
 from src.inference_props import DEFAULT_ALLOY, list_alloys, list_molds
 from src.predict_casting import predict_casting
-from tools.doe.load_properties import load_chill_effusivities
 
 DEFAULT_MOLD = "green_sand"
-SLEEVE_REGISTRY_CSV = "tools/sleeves/sleeve_registry.csv"
 
 pv.OFF_SCREEN = True
 
@@ -60,23 +54,6 @@ FIELD_CMAP = "turbo_r"      # reversed turbo (red -> blue): wide, high-contrast 
 HOTSPOT_COLOR = "#0092b8"   # deep cyan/teal marker: falls in the middle of turbo's
                             # range but is rendered as small spheres (not a field
                             # color), so it still reads as an overlay/alert
-
-# --- assembly mode (Part B Task 5) -----------------------------------------
-# One row per solid in a multi-body STEP upload: role dropdown (defaults
-# largest solid = casting, everything else = ignore) + role-dependent params
-# (chill material / sleeve name) feeding `src.assembly.validate_bodies` and
-# `predict_casting(..., bodies=...)`. The 3-D preview colors each solid's
-# coarse tessellation by its currently-selected role; "ignore" bodies stay
-# the casting's neutral grey but at the same faint GHOST_OPACITY used for the
-# solidified-region ghost actor elsewhere in this file.
-ROLE_OPTIONS = ["casting", "chill", "insulating_sleeve", "exo_sleeve", "ignore"]
-ROLE_COLORS = {
-    "casting": "#9e9e9e",
-    "chill": "#2196f3",
-    "insulating_sleeve": "#ffc107",
-    "exo_sleeve": "#f44336",
-    "ignore": "#9e9e9e",
-}
 
 _MONO_STACK = ('"JetBrains Mono", ui-monospace, "SFMono-Regular", '
               "Menlo, Consolas, monospace")
@@ -203,149 +180,14 @@ def summary_text(result: dict, alloy: str = None, mold: str = None) -> str:
 INITIAL_SUMMARY = "(upload a STEP file)"
 
 
-def _run_prediction(step_path, out_dir, alloy, mold, bodies=None):
-    """Thin wrapper around `predict_casting` forwarding alloy/mold conditioning
-    and (Part B Task 5) an optional multi-body role assignment.
+def _run_prediction(step_path, out_dir, alloy, mold):
+    """Thin wrapper around `predict_casting` forwarding alloy/mold conditioning.
 
     Extracted so the upload handler's predict call is unit-testable without
     driving the full trame upload flow (module-level lookup of
     `predict_casting` so tests can monkeypatch `src.webapp.predict_casting`).
-    `bodies` is only forwarded as a keyword when given (not merely `None`),
-    so the pre-Part-B single-solid call shape (no `bodies` kwarg at all)
-    stays byte-identical -- some callers (this module's own existing tests)
-    monkeypatch `predict_casting` with a fake that doesn't accept `bodies`.
     """
-    if bodies is not None:
-        return predict_casting(step_path, out_dir=out_dir, alloy=alloy, mold=mold, bodies=bodies)
     return predict_casting(step_path, out_dir=out_dir, alloy=alloy, mold=mold)
-
-
-def _load_sleeve_names_by_type(csv_path=SLEEVE_REGISTRY_CSV):
-    """{"exo": [name, ...], "insulating": [name, ...]} from
-    `tools/sleeves/sleeve_registry.csv`'s `name`/`type` columns, sorted --
-    the source of the sleeve-name dropdown options for the assembly panel,
-    pre-filtered by role so the UI never offers a sleeve `validate_bodies`
-    would reject for a type mismatch (see `src.assembly.validate_bodies`'s
-    `_ROLE_TO_SLEEVE_TYPE` cross-check)."""
-    out: dict[str, list[str]] = {"exo": [], "insulating": []}
-    try:
-        with open(csv_path, newline="") as f:
-            for row in csv.DictReader(f):
-                names = out.setdefault(row["type"], [])
-                names.append(row["name"])
-    except FileNotFoundError:
-        pass
-    for names in out.values():
-        names.sort()
-    return out
-
-
-def _assemble_bodies_from_state(state_like) -> list:
-    """Pure builder: the assembly panel's per-row state (`state_like.
-    assembly_bodies`, one dict per solid with at least `solid_id` and
-    `role`, plus an optional `params`) -> the plain `bodies` list
-    `src.assembly.validate_bodies`/`predict_casting(..., bodies=...)`
-    expect (`{"solid_id", "role", "params"}`, UI-only fields like `name`/
-    `volume_mm3` dropped). Takes anything with attribute access
-    (`state_like.assembly_bodies`) so it is testable with a plain
-    `SimpleNamespace`/fake as well as the real trame state -- no gmsh, no
-    validation (that's `validate_bodies`'s job, called separately as a
-    pre-flight check by the Run-assembly handler)."""
-    rows = state_like.assembly_bodies or []
-    bodies = []
-    for row in rows:
-        body = {"solid_id": row["solid_id"], "role": row.get("role", "ignore")}
-        params = row.get("params")
-        if params:
-            body["params"] = params
-        bodies.append(body)
-    return bodies
-
-
-def _solid_preview_meshes(step_path):
-    """Coarse per-solid surface tessellation for the assembly 3-D preview:
-    one fresh gmsh/OCC session imports `step_path` and generates a SINGLE
-    2-D surface mesh over the whole model, but sized PER SOLID (each
-    solid's own boundary points get their own target size, its OWN bbox
-    diagonal / 15, via `gmsh.model.mesh.setSize` + gmsh's default
-    `Mesh.MeshSizeExtendFromBoundary` sizing field) -- a large casting
-    tessellates at its own coarse scale while a small chill/sleeve still
-    gets enough triangles to read as a shape, instead of one uniform size
-    forcing every solid into whichever end of the size range is wrong for
-    it (a small uniform size on a big casting is a triangle-count blowup;
-    a uniform size sized for the casting leaves a small role body a
-    handful of degenerate facets). Returns one `(solid_id,
-    pyvista.PolyData)` per 3-D solid (its own boundary surfaces' triangles
-    + nodes). `solid_id` matches what `list_solids` reports for the SAME
-    STEP file, since both walk a fresh `gmsh.model.occ.importShapes` +
-    `gmsh.model.getEntities(3)` and gmsh assigns solid tags
-    deterministically from import order.
-
-    Real-gmsh, no mocking -- callers should expect this to be slow-ish (a
-    full 2-D mesh pass) but bounded for the coarse sizes used here."""
-    import gmsh
-
-    gmsh.initialize()
-    try:
-        gmsh.option.setNumber("General.Terminal", 0)
-        gmsh.model.add("assembly_preview")
-        gmsh.model.occ.importShapes(step_path)
-        gmsh.model.occ.synchronize()
-
-        solids = gmsh.model.getEntities(3)
-        if not solids:
-            return []
-
-        size_by_tag = {}
-        for (_dim, tag) in solids:
-            xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.getBoundingBox(3, tag)
-            diag = float(np.linalg.norm([xmax - xmin, ymax - ymin, zmax - zmin]))
-            size_by_tag[tag] = max(diag / 15.0, 1e-3)
-
-        # Global bounds only fence in gmsh's implicit sizing AWAY from any
-        # explicitly-sized point (e.g. deep in a solid's interior); the
-        # per-solid setSize calls below are what actually drive each
-        # solid's own coarse scale.
-        gmsh.option.setNumber("Mesh.MeshSizeMin", min(size_by_tag.values()))
-        gmsh.option.setNumber("Mesh.MeshSizeMax", max(size_by_tag.values()))
-        gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 1)
-        for (_dim, tag) in solids:
-            boundary_pts = gmsh.model.getBoundary([(3, tag)], recursive=True)
-            point_dimtags = [(d, t) for (d, t) in boundary_pts if d == 0]
-            if point_dimtags:
-                gmsh.model.mesh.setSize(point_dimtags, size_by_tag[tag])
-        gmsh.model.mesh.generate(2)
-
-        out = []
-        for (_dim, tag) in solids:
-            boundary = gmsh.model.getBoundary([(3, tag)], oriented=False)
-            surf_tags = [t for (d, t) in boundary if d == 2]
-            node_xyz_by_id = {}
-            tri_blocks = []
-            for surf_tag in surf_tags:
-                node_tags, coords, _param = gmsh.model.mesh.getNodes(
-                    2, surf_tag, includeBoundary=True)
-                coords = np.asarray(coords, dtype=np.float64).reshape(-1, 3)
-                for nid, xyz in zip(node_tags, coords):
-                    node_xyz_by_id.setdefault(int(nid), xyz)
-                elem_types, _elem_tags, elem_node_tags = gmsh.model.mesh.getElements(2, surf_tag)
-                for etype, enodes in zip(elem_types, elem_node_tags):
-                    if etype != 2:   # gmsh type 2 = 3-node triangle
-                        continue
-                    tri_blocks.append(np.asarray(enodes, dtype=np.int64).reshape(-1, 3))
-            if not tri_blocks or not node_xyz_by_id:
-                continue
-            tris = np.concatenate(tri_blocks, axis=0)
-            node_ids = sorted(node_xyz_by_id)
-            local_index = {nid: i for i, nid in enumerate(node_ids)}
-            points = np.array([node_xyz_by_id[nid] for nid in node_ids], dtype=np.float64)
-            local_tris = np.vectorize(local_index.get)(tris)
-            faces = np.hstack(
-                [np.full((local_tris.shape[0], 1), 3, dtype=np.int64), local_tris])
-            out.append((tag, pv.PolyData(points, faces)))
-        return out
-    finally:
-        gmsh.finalize()
 
 
 def _rebuild_hotspots(app):
@@ -379,105 +221,12 @@ def _remove_scalar_bar(plotter):
         pass
 
 
-def _render_assembly_preview(app):
-    """(Re)draw every cached assembly-preview mesh (`app["assembly_meshes"]`,
-    built once by `_enter_assembly_mode`), colored/opacity'd by each body's
-    CURRENT role in `state.assembly_bodies` (see `ROLE_COLORS`/
-    `GHOST_OPACITY`). Called on entering assembly mode and again whenever
-    `assembly_bodies` changes (role edits) -- cheap, since it only touches
-    actors, never re-tessellates."""
-    plotter, server = app["plotter"], app["server"]
-    state, ctrl = server.state, server.controller
-    plotter.clear_actors()
-    _remove_scalar_bar(plotter)
-    roles = {b["solid_id"]: b.get("role", "ignore") for b in (state.assembly_bodies or [])}
-    meshes = app.get("assembly_meshes") or []
-    for solid_id, mesh in meshes:
-        role = roles.get(solid_id, "ignore")
-        color = ROLE_COLORS.get(role, ROLE_COLORS["ignore"])
-        opacity = GHOST_OPACITY if role == "ignore" else 1.0
-        plotter.add_mesh(mesh, color=color, opacity=opacity,
-                         name=f"assembly_solid_{solid_id}", smooth_shading=True)
-    if meshes:
-        plotter.reset_camera()
-    ctrl.view_update()
-
-
-def _enter_assembly_mode(app, step_path, rows):
-    """Switch the viewer into assembly mode for a multi-solid STEP upload:
-    builds the role-colored 3-D preview meshes FIRST (`_solid_preview_meshes`
-    into `app["assembly_meshes"]`), THEN seeds `state.assembly_bodies` from
-    `list_solids`' rows (default roles -- largest solid = casting, everything
-    else = ignore, per the brief) and renders (`_render_assembly_preview`).
-    This order matters: `state.assembly_bodies` is watched
-    (`_on_assembly_bodies_change` -> `_render_assembly_preview`), so setting
-    it BEFORE `app["assembly_meshes"]` is refreshed would briefly recolor
-    whatever meshes happened to be cached from a PRIOR upload (e.g. a
-    multi -> single -> multi upload sequence) against the new roles -- a
-    stale-preview flash. A preview failure (e.g. a STEP gmsh can list solids
-    for but not re-tessellate) is surfaced in `state.assembly_error` rather
-    than raised -- the body table/role panel still works without a 3-D
-    preview."""
-    server = app["server"]
-    state = server.state
-    app["grid"] = None
-    app["hotspot_actor"] = None
-    state.loaded = False
-    state.summary = INITIAL_SUMMARY
-    state.assembly_step_path = step_path
-    state.assembly_error = ""
-
-    try:
-        app["assembly_meshes"] = _solid_preview_meshes(step_path)
-    except Exception as e:
-        app["assembly_meshes"] = []
-        state.assembly_error = f"3D preview failed: {e}"
-
-    bodies = []
-    for i, row in enumerate(rows):
-        bodies.append({
-            "solid_id": row["solid_id"],
-            "name": row["name"] or f"solid {row['solid_id']}",
-            "volume_mm3": row["volume_mm3"],
-            "role": "casting" if i == 0 else "ignore",
-            "params": {},
-        })
-    state.assembly_mode = True
-    state.assembly_bodies = bodies
-    _render_assembly_preview(app)
-
-
 def _process_upload(app, step_path, alloy, mold):
     """Core upload logic, extracted from the `uploaded_file` state-change
     handler so it is testable without a browser/file-upload round trip:
-    inspects `step_path` via `list_solids`; >1 solid enters assembly mode
-    (`_enter_assembly_mode` -- role panel + 3-D preview, prediction deferred
-    to the Run-assembly button); exactly 1 solid (or a STEP `list_solids`
-    itself can't parse -- fails soft here so it falls through to the SAME
-    meshing/healing pipeline `predict_casting` always used) runs the
-    original single-solid predict-and-render flow, byte-identical to
-    pre-Part-B behavior."""
+    run the prediction and render it, keeping the UI alive on failure."""
     server = app["server"]
     state = server.state
-    try:
-        rows = list_solids(step_path)
-    except Exception:
-        rows = []   # fall back to the pre-Part-B single-body flow untouched
-
-    if len(rows) > 1:
-        _enter_assembly_mode(app, step_path, rows)
-        return
-
-    # Single-solid (or unlistable) upload: leave no assembly-mode residue
-    # behind -- mirrors clear_casting()'s reset of the same four fields, so
-    # a LATER multi-solid upload starts from a clean slate rather than
-    # _enter_assembly_mode briefly recoloring stale meshes/rows from a
-    # previous assembly session (see _enter_assembly_mode's docstring).
-    state.assembly_mode = False
-    state.assembly_bodies = []
-    state.assembly_error = ""
-    state.assembly_step_path = None
-    app["assembly_meshes"] = []
     plotter = app["plotter"]
     out_dir = "runs/castings"
     try:
@@ -559,7 +308,6 @@ def build_app(server=None):
             },
         },
     }
-    sleeve_names_by_type = _load_sleeve_names_by_type()
     for k, v in dict(tau=0.0, tmin=0.0, tmax=1.0, show_hotspots=False,
                      summary=INITIAL_SUMMARY, loaded=False, uploaded_file=None,
                      loading=False, hotspot_size=DEFAULT_HOTSPOT_SIZE,
@@ -567,13 +315,6 @@ def build_app(server=None):
                      anim_uri="", anim_name="solidification.gif",
                      alloy=DEFAULT_ALLOY, mold=DEFAULT_MOLD,
                      alloy_options=list_alloys(), mold_options=list_molds(),
-                     # Assembly mode (Part B Task 5): populated by
-                     # _enter_assembly_mode() on a multi-solid STEP upload.
-                     assembly_mode=False, assembly_bodies=[], assembly_error="",
-                     assembly_step_path=None, role_options=ROLE_OPTIONS,
-                     chill_material_options=sorted(load_chill_effusivities()),
-                     exo_sleeve_options=sleeve_names_by_type["exo"],
-                     insulating_sleeve_options=sleeve_names_by_type["insulating"],
                      ).items():
         state.setdefault(k, v)
 
@@ -621,64 +362,12 @@ def build_app(server=None):
             state.loading = False
             ctrl.view_update()
 
-    @state.change("assembly_bodies")
-    def _on_assembly_bodies_change(**kwargs):
-        # Fires on every role/param edit in the body table (trame syncs the
-        # whole reactive list back on any nested-item mutation) -- just
-        # recolor the already-tessellated preview, never re-tessellate.
-        if state.assembly_mode:
-            _render_assembly_preview(app)
-
-    def run_assembly_prediction():
-        """The assembly panel's "Run" button: build the bodies list from the
-        current panel state, pre-flight it through `validate_bodies` so a
-        training-regime violation (see `src.assembly.validate_bodies`) shows
-        up in the panel (`state.assembly_error`) WITHOUT ever calling
-        `predict_casting` -- never a crash for a bad role combination.
-        `_assemble_bodies_from_state` itself is inside this same try/except:
-        a malformed row (e.g. a missing `solid_id`) is a caller/state bug,
-        not a training-regime violation, but it should surface in the panel
-        exactly the same way -- never a raw traceback, and never a
-        `predict_casting` call on a bodies list that failed to even build."""
-        try:
-            bodies = _assemble_bodies_from_state(state)
-            validate_bodies(bodies)
-        except Exception as e:
-            state.assembly_error = str(e)
-            ctrl.view_update()
-            return
-        state.assembly_error = ""
-        state.loading = True
-        state.flush()
-        try:
-            result = _run_prediction(state.assembly_step_path, "runs/castings",
-                                     state.alloy, state.mold, bodies=bodies)
-            grid = viz.load_prediction(result["vtu"])
-            app["name"] = result["name"]
-            state.assembly_mode = False
-            render_prediction(app, grid, summary_text(result, alloy=state.alloy, mold=state.mold))
-        except Exception as e:            # keep the UI alive on a bad assembly/prediction
-            plotter.clear_actors()
-            _remove_scalar_bar(plotter)
-            app["grid"] = None
-            app["hotspot_actor"] = None
-            state.loaded = False
-            state.summary = f"Prediction failed:\n{e}"
-        finally:
-            state.loading = False
-            ctrl.view_update()
-
-    # Exposed on the controller so the Run button (and tests) can invoke it
-    # without a browser round trip.
-    ctrl.run_assembly_prediction = run_assembly_prediction
-
     def clear_casting():
         """Drop the loaded casting and return to a ready-for-upload state."""
         plotter.clear_actors()
         _remove_scalar_bar(plotter)
         app["grid"] = None
         app["hotspot_actor"] = None
-        app["assembly_meshes"] = []
         state.loaded = False
         state.summary = INITIAL_SUMMARY
         state.uploaded_file = None
@@ -687,10 +376,6 @@ def build_app(server=None):
         state.anim_ready = False
         state.anim_uri = ""
         state.animating = False
-        state.assembly_mode = False
-        state.assembly_bodies = []
-        state.assembly_error = ""
-        state.assembly_step_path = None
         ctrl.view_update()
 
     # Exposed on the controller so tests (and any future non-UI caller) can
@@ -783,57 +468,6 @@ def build_app(server=None):
                     vuetify3.VBtn("Clear", click=clear_casting, variant="text",
                                   size="small", color="secondary", disabled=("!loaded",),
                                   classes="mt-2", block=True)
-
-                # Assembly mode (Part B Task 5): shown instead of an
-                # auto-run prediction whenever the STEP upload has >1
-                # solid. One row per body -- role dropdown (defaults
-                # largest=casting/rest=ignore, set by _enter_assembly_mode)
-                # + a role-dependent params select (chill material / sleeve
-                # name, the latter pre-filtered by sleeve type so the UI
-                # never offers a pairing validate_bodies would reject).
-                # `v_model="body.<path>"` (a literal string, not a
-                # (name, default) tuple) is trame's standard per-row
-                # editable-table idiom: it binds directly to the `body`
-                # loop variable from `v_for`, and edits to `assembly_bodies`
-                # sync back to the server as a whole (see
-                # `_on_assembly_bodies_change`).
-                with html.Div(classes="neuralcast-section", v_show=("assembly_mode",)):
-                    html.Div("Assembly (multi-body STEP)",
-                             classes="neuralcast-section-label")
-                    with html.Template(v_for="body in assembly_bodies", key="body.solid_id"):
-                        with html.Div(classes="mb-3"):
-                            html.Div(
-                                "{{ body.name || ('solid ' + body.solid_id) }} "
-                                "— {{ Number(body.volume_mm3).toFixed(0) }} mm³",
-                                style=f"font-size:.75rem; color:{TEXT_MUTED}; "
-                                      "margin-bottom:2px;",
-                            )
-                            vuetify3.VSelect(v_model="body.role", items=("role_options",),
-                                             label="role", density="compact",
-                                             variant="outlined", hide_details=True,
-                                             classes="mb-1")
-                            vuetify3.VSelect(v_model="body.params.material",
-                                             items=("chill_material_options",),
-                                             label="chill material", density="compact",
-                                             variant="outlined", hide_details=True,
-                                             v_if="body.role === 'chill'")
-                            vuetify3.VSelect(v_model="body.params.sleeve",
-                                             items=("exo_sleeve_options",),
-                                             label="sleeve (exo)", density="compact",
-                                             variant="outlined", hide_details=True,
-                                             v_if="body.role === 'exo_sleeve'")
-                            vuetify3.VSelect(v_model="body.params.sleeve",
-                                             items=("insulating_sleeve_options",),
-                                             label="sleeve (insulating)", density="compact",
-                                             variant="outlined", hide_details=True,
-                                             v_if="body.role === 'insulating_sleeve'")
-                    html.Div("{{ assembly_error }}", v_show=("assembly_error",),
-                             style=f"color:{ACCENT_MOLTEN}; font-size:.75rem; "
-                                   "margin:4px 0 8px;")
-                    vuetify3.VBtn("Run Assembly Prediction",
-                                  click=ctrl.run_assembly_prediction,
-                                  variant="tonal", size="small", color="primary",
-                                  disabled=("loading",), loading=("loading",), block=True)
 
                 with html.Div(classes="neuralcast-section"):
                     html.Div("Playback", classes="neuralcast-section-label")

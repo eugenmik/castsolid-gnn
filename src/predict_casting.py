@@ -84,10 +84,7 @@ then feeds those into `src.shrinkage.screen_casting`'s exact Niyama branch
 instead of the time-only proxy, and relabels the result `niyama_source=
 "learned"` (screen_casting's own "exact" label is reserved for a real cached
 solver field). Absent entirely for a headless checkpoint -- byte-identical
-to the pre-Task-3 proxy-only behavior. The chill low-confidence
-`niyama_confidence` marking (spec ADDENDUM 2) is UNCHANGED by this -- still
-keyed only on `plan.bc_config == "chills"`, regardless of `niyama_source`;
-retiring that scoping is a later (promotion-step) task.
+to the pre-Task-3 proxy-only behavior.
 
 bc-reach Task 4 (cfg-driven v5 feature building at inference): the film
 branch's `compute_features_inference` call now reads
@@ -102,8 +99,7 @@ independent of but in practice equal to `node_in`), so loading one through
 `exo_mid`/`exo_long`/`chill_short`/`chill_mid`/`chill_long`) with NO other
 change to this module -- `compute_bc_reach_channels` (features v5) already
 resolves its chill/exo source patch off the SAME `spec`/`bc_spec` dicts
-this module already builds from `bc_plan.feature_spec(...)`/the all-sand
-literal, so the reach channels see EXACTLY the same source magnitudes the
+this module already builds from the all-sand literal, so the reach channels see EXACTLY the same source magnitudes the
 training builder (`src.build_dataset.build_v5`) does. A v4 (or absent)
 `cfg["feature_version"]` is byte-identical to the pre-Task-4 code (defaults
 to `4`, same as before this dispatch existed)."""
@@ -230,18 +226,12 @@ def _std_row_for_predict_field(row_16: np.ndarray, X: np.ndarray, n_features: in
 
 
 def predict_field(mesh, gnn_model, hgb_model, norm, cfg=None, device=None, tta=0,
-                  k=16, baseline_norm=None, props=None, bc_plan=None, hgb_std=None,
+                  k=16, baseline_norm=None, props=None, hgb_std=None,
                   lambda_shrink: float = 1.0, w_total: float = DEFAULT_W_TOTAL,
                   w_std: float = DEFAULT_W_STD) -> tuple:
-    """`bc_plan` (Part B Task 4): an optional `src.assembly.BcPlan`, resolved
-    by `validate_bodies` from a multi-body role assignment. `None` (the
-    default) is byte-identical to the pre-Part-B behavior -- the film
-    branch's `spec` stays the all-sand literal and `gbm_v2_total_seconds` is
-    called with `bc_spec=None` (its own "plain sand mold" default). When
-    given, the film branch's `spec` comes from `bc_plan.feature_spec(...)`
-    (carries `chill_effusivity`/`sleeve_MEF`/`exo_q0`/`bc_config`) and
-    `gbm_v2_total_seconds` gets `bc_spec=bc_plan.gbm_bc_spec()`. Ignored
-    entirely by the non-film (SP1) path -- SP1 has no BC channel at all.
+    """The film branch always uses the all-sand boundary spec: the whole
+    outer surface cools into the mold, and the model's chill/sleeve input
+    channels stay at zero (this release supports the sand-mold regime only).
 
     `hgb_std` (variance-recomposition Task 3, recomposition swapped to
     `hybrid_field_soft` by soft-anchor Task 3): an optional loaded GBM
@@ -311,13 +301,9 @@ def predict_field(mesh, gnn_model, hgb_model, norm, cfg=None, device=None, tta=0
                 "(the v2-total GBM scale head) -- got None")
         _check_hgb_dim(hgb_model, N_GBM_V2_FEATURES, "film (v4)")
 
-        if bc_plan is not None:
-            spec = bc_plan.feature_spec(props["mold_effusivity"])
-            bc_spec = bc_plan.gbm_bc_spec()
-        else:
-            spec = {"mold_effusivity": props["mold_effusivity"], "bc_config": "none",
-                    "chill_effusivity": 0.0, "sleeve_MEF": 0.0, "exo_q0": 0.0}
-            bc_spec = None
+        spec = {"mold_effusivity": props["mold_effusivity"], "bc_config": "none",
+                "chill_effusivity": 0.0, "sleeve_MEF": 0.0, "exo_q0": 0.0}
+        bc_spec = None
         feat = compute_features_inference(mesh, version=cfg.get("feature_version", 4), spec=spec)
         X, pos = feat["X"], feat["pos"]
         g_vec = alloy_g_vector(props)
@@ -437,156 +423,6 @@ def _shrinkage_surface_and_feed_nodes(mesh):
     return surface_nodes.astype(np.int64), feed_nodes.astype(np.int64)
 
 
-# --------------------------------------------------------------------------- #
-# Part-B roles task (2026-08-03): role-aware feed-node selection, replacing
-# review finding I1's coarse `plan.bc_config == "chills"` special case (which
-# forced feed_nodes empty for the WHOLE input whenever any chill role was
-# present, rather than excluding just the chill bodies' own patch nodes).
-# `src.assembly.tag_contact_patches` relabels EVERY role body's contact patch
-# "Adiabatic" regardless of role (chills included) -- these two pure helpers
-# recover the per-BODY-role distinction from `tag_contact_patches`'s
-# `nodes_by_solid` output (per-solid, geometry-only) + a solid_id -> role
-# lookup (`BcPlan.role_by_solid`), so the exclusion decision is made per
-# body, never per global `bc_config`.
-#
-# Investigation note (binding on the design below): in bodies mode the
-# casting mesh handed to `tag_contact_patches` never carries a PRE-EXISTING
-# "Adiabatic" group of its own. `bodies` requires `mesh_mode="prep"` (see the
-# guard above `predict_casting` raises), and `tools.doe.prep_parts.
-# heal_and_mesh` -- the only meshing path "prep" mode uses -- tags every
-# casting surface "Cooling" uniformly with no Adiabatic seed at all (verified
-# in `tools/doe/prep_parts.py` and `src/step_mesh.py`: neither ever calls
-# `setPhysicalName(2, ..., "Adiabatic")`; the ONLY producer of an "Adiabatic"
-# physical group anywhere in this codebase is `src.assembly.
-# rewrite_msh_adiabatic`, i.e. THIS tagging pass itself, or FT3's training-
-# data patch simulator `tools/doe/virtual_patches.py`, which never runs at
-# inference time). So every "Adiabatic" triangle on a bodies-mode inference
-# mesh is a role-body contact patch -- there is no separate "genuine riser"
-# contribution that could coexist with role patches and would need unioning
-# in on top of the per-role mapping below. The bare/all-sand path (no
-# `bodies`) is therefore UNCHANGED by this task: `_shrinkage_surface_and_
-# feed_nodes`'s "Adiabatic" union (if the mesh has one at all -- only
-# possible via `mesh_mode="raw"` or a training `.msh` with real user-tagged
-# riser faces) keeps meaning exactly what it always has.
-# --------------------------------------------------------------------------- #
-def _nodes_by_role_from_tagging(nodes_by_solid: dict, role_by_solid: dict) -> dict:
-    """Group `tag_contact_patches`'s per-solid contact-patch node ids
-    (`nodes_by_solid`, `{solid_id: node ids}` -- solid_id keys may arrive as
-    `str` after a mesh-cache JSON round-trip on a cache HIT, handled here via
-    `int()`) by each solid's declared role (`role_by_solid`, `{solid_id:
-    role}`, e.g. `BcPlan.role_by_solid`).
-
-    A solid_id present in `nodes_by_solid` with no entry in `role_by_solid`
-    is dropped rather than raising, but LOUDLY (`logger.warning`, naming the
-    solid_id) -- review round 1, M1: silently dropping it would silently
-    mis-attribute (or simply lose) that body's contact-patch nodes. In the
-    normal `predict_casting` call path this warning never actually fires:
-    `_role_aware_feed_nodes` (review round 1, H1) only calls this function
-    after confirming `nodes_by_solid` covers every id in `plan.
-    role_solid_ids`, and `role_by_solid` covers exactly those same ids by
-    construction in `validate_bodies` -- this is a defense-in-depth net for
-    any future/direct caller that skips that completeness check, not a code
-    path this module exercises today.
-
-    Returns `{role: sorted node ids}`.
-
-    NOTE on shared-node precedence (L3, review round 1): if a node's
-    contact-patch membership spans more than one role (two role bodies'
-    `tol_mm` zones overlap on the casting surface -- see `tag_contact_
-    patches`'s documented double-counting of `per_body_patch_area_mm2`),
-    this function keeps it under EVERY role it was classified into, and
-    `_feed_nodes_from_role_patches` below then unions in whichever of those
-    roles is a sleeve role -- i.e. a node shared between a chill patch and a
-    sleeve patch counts as fed ("sleeve wins"), matching the spec's literal
-    per-role union rule. `validate_bodies` forbids a chills+sleeve mix today
-    so this can never actually occur via the validated path (only via a
-    directly-constructed mapping that bypasses it, e.g. this module's own
-    mixed-mapping unit test). A FUTURE mixed-role regime might instead want
-    "chill wins" for a shared node (the more physically conservative choice
-    -- proximity to a chill accelerates freezing there regardless of a
-    nearby sleeve) -- flagged here for that future design, not implemented
-    now."""
-    grouped: dict[str, set] = {}
-    for sid_key, nodes in nodes_by_solid.items():
-        sid = int(sid_key)
-        role = role_by_solid.get(sid)
-        if role is None:
-            logger.warning(
-                f"_nodes_by_role_from_tagging: solid_id={sid} has classified "
-                f"contact-patch nodes but no entry in role_by_solid -- "
-                f"dropping it from the per-role feed-node mapping rather than "
-                f"silently mis-attributing it to some other role")
-            continue
-        grouped.setdefault(role, set()).update(int(n) for n in nodes)
-    return {role: sorted(ids) for role, ids in grouped.items()}
-
-
-def _feed_nodes_from_role_patches(nodes_by_role: dict) -> np.ndarray:
-    """The sorted-unique union of every SLEEVE role's nodes
-    (`src.assembly._SLEEVE_ROLES` = `insulating_sleeve`/`exo_sleeve`) in
-    `nodes_by_role` (`{role: iterable of node ids}`) -- a chill patch, or any
-    other non-sleeve role, NEVER contributes a feed node. Pure function of
-    its argument, with NO `BcPlan`/`bc_config` involved at all: it stays
-    correct even fed a directly-constructed mapping mixing roles that
-    `validate_bodies` itself would reject (chills + a sleeve combined) --
-    the decision is per body role, not per global config. See
-    `_nodes_by_role_from_tagging`'s docstring (L3, review round 1) for the
-    shared-node ("sleeve wins") precedence this union implies when a node is
-    classified into more than one role."""
-    feed: set = set()
-    for role, nodes in nodes_by_role.items():
-        if role in _SLEEVE_ROLES:
-            feed.update(int(n) for n in nodes)
-    return np.asarray(sorted(feed), dtype=np.int64)
-
-
-def _role_aware_feed_nodes(step_path: str, nodes_by_solid: dict, plan,
-                           fallback_feed_nodes: np.ndarray) -> np.ndarray:
-    """Review round 1, H1: `nodes_by_solid` is only present in `prep_info`
-    when `tag_contact_patches` actually ran on THIS call. A mesh-cache HIT
-    served from a side-car JSON written BEFORE the Part-B roles task never
-    had `nodes_by_solid` written into it at all (the key didn't exist yet),
-    and even a post-task entry could in principle cover only some of
-    `plan.role_solid_ids`. `MESH_PIPELINE_VERSION` is deliberately NOT
-    bumped for this task (cache keys are binding, per the task brief), so
-    such LEGACY entries are genuinely reachable today -- `runs/mesh_cache/`
-    already holds pre-task assembly entries, including both gold parts.
-    Naively grouping incomplete/absent `nodes_by_solid` data would silently
-    degrade `feed_nodes` to empty for EVERY `bc_config` (not just chills),
-    a silent regression on exactly the sleeve inputs this task's own byte-
-    identity test binds. `plan.role_solid_ids` MUST all be present as keys
-    of `nodes_by_solid` (after normalizing str keys) for the new per-role
-    path to run at all; otherwise this loudly (`logger.warning`, naming
-    `step_path`) falls back to the PRE-CHANGE rule: empty for `bc_config ==
-    "chills"`, the passed-through `fallback_feed_nodes` (the plain
-    "Adiabatic"-tag node union `_shrinkage_surface_and_feed_nodes` already
-    computed) for every other config -- i.e. exactly review finding I1's
-    original fix, byte-identical to `predict_casting`'s behavior before this
-    task. Recommends refreshing/clearing the mesh-cache entry for
-    `step_path` (see `src.mesh_cache.clear_mesh_cache`) so a later run gets
-    full per-role accuracy."""
-    required_ids = set(plan.role_solid_ids)
-    covered_ids = {int(k) for k in nodes_by_solid}
-    if not required_ids.issubset(covered_ids):
-        logger.warning(
-            f"predict_casting: role-aware contact-patch node metadata is "
-            f"missing or incomplete for step_path={step_path!r} "
-            f"(nodes_by_solid covers solid_id(s) {sorted(covered_ids)}, but "
-            f"plan.role_solid_ids requires {sorted(required_ids)}) -- this is "
-            f"almost certainly a LEGACY runs/mesh_cache/ entry written before "
-            f"the Part-B roles task (nodes_by_solid didn't exist yet). "
-            f"Falling back to the pre-change feed-node rule (empty for "
-            f"bc_config=='chills', the Adiabatic-tag union otherwise) rather "
-            f"than silently zeroing every config's feed_nodes. Recommend "
-            f"clearing/refreshing the mesh-cache entry for this STEP file "
-            f"(see src.mesh_cache.clear_mesh_cache) to restore full per-role "
-            f"feed-node accuracy on the next run.")
-        return (np.zeros(0, dtype=np.int64) if plan.bc_config == "chills"
-                else fallback_feed_nodes)
-    nodes_by_role = _nodes_by_role_from_tagging(nodes_by_solid, plan.role_by_solid)
-    return _feed_nodes_from_role_patches(nodes_by_role)
-
-
 def _shrinkage_result_for_return(screen: dict) -> dict:
     """Directive 6: the `screen_casting` result MINUS its bulky per-node
     arrays (`niyama`/`porosity_risk` dropped), plus summary counts +
@@ -633,37 +469,6 @@ def _write_shrinkage_summary_block(f, shrinkage) -> None:
         return
     f.write("shrinkage screening:\n")
     f.write(f"  niyama_source: {shrinkage['niyama_source']}\n")
-    if shrinkage.get("niyama_confidence") == "low":
-        # Spec ADDENDUM 2 (2026-08-01, owner-approved scoped ship): Gate C
-        # passed both floors on the all-sand slice (sleeves owner-accepted as
-        # intermediate: rho 0.768/0.691, below the 0.8 floor) but failed on the
-        # chill-bearing slice (Spearman rho 0.313) -- the proxy Niyama
-        # identity `Tdot_proxy = (TL-TS)/t_s` has no way to see a chill's
-        # locally-enhanced cooling rate, so its Niyama ranking on a
-        # chill-bearing input is not trustworthy the way it is on a bare or
-        # sleeve-only casting. Macro-shrinkage/sinks/feeders don't depend on
-        # Niyama at all and keep full confidence regardless.
-        #
-        # Learned-heads Task 3 review round 1, F3: the marking itself
-        # (`niyama_confidence == "low"` on any chill-bearing input) STAYS as
-        # is until the promote step (per the spec's own retirement plan) --
-        # only the CAVEAT TEXT is now conditional on `niyama_source`. The
-        # proxy's specific failure mode (and its Gate C rho number) is a
-        # claim about the PROXY identity, not about a learned checkpoint's
-        # heads -- citing "rho 0.313" next to a learned-source result would
-        # misattribute the proxy's own measured shortfall to a different
-        # (not yet slice-validated) source. A learned checkpoint gets a
-        # neutral caveat instead, pending its own Gate C learned-mode slice
-        # numbers (`tools/gate_c.py field_source="learned"`).
-        if shrinkage["niyama_source"] == "proxy":
-            f.write("  niyama confidence: LOW (chill-bearing input; proxy Niyama cannot see "
-                   "chill-local cooling rates — Gate C chills slice rho 0.313)\n")
-        elif shrinkage["niyama_source"] == "learned":
-            f.write("  niyama confidence: LOW (chill-bearing input; learned-head Niyama "
-                   "pending slice validation)\n")
-        else:
-            f.write(f"  niyama confidence: LOW (chill-bearing input; "
-                   f"niyama_source={shrinkage['niyama_source']!r})\n")
     flagged_line = f"  flagged nodes: {shrinkage['flagged_frac'] * 100.0:.1f}%"
     if shrinkage["niyama_source"] == "proxy":
         # Review round 1, finding 4: the proxy path's risk mask is
@@ -819,38 +624,7 @@ from src.step_mesh import mesh_step
 from src.msh_parse import parse_msh
 from src import ood as _ood
 from src.mesh_cache import get_or_mesh
-from src.assembly import validate_bodies, tag_contact_patches, _SLEEVE_ROLES
 from tools.doe.prep_parts import DEFAULT_TARGET_NODES
-
-
-def _bodies_cache_key(bodies: list, plan) -> str:
-    """Part B Task 4: a normalized-content hash of `bodies`, folding in the
-    resolved `BcPlan` scalars (`chill_effusivity`/`sleeve_MEF`/`exo_q0`) for
-    whichever body ids are `plan.role_solid_ids` -- NOT the raw role/params
-    text the caller typed -- so a `sleeve_registry.csv`/`chills.csv` edit
-    changes the mesh-cache key even for a byte-identical `bodies.json` (the
-    key means "this exact resolved BC plan", not just "this exact JSON
-    text"). Order-invariant (sorted by `solid_id`) and role-sensitive (a
-    role change always changes that row, even for a body with no numeric
-    params of its own, e.g. `"casting"` or `"ignore"`)."""
-    role_ids = set(plan.role_solid_ids)
-    rows = []
-    for i, b in enumerate(bodies):
-        if "solid_id" not in b:
-            raise ValueError(
-                f"_bodies_cache_key: bodies[{i}] (role={b.get('role')!r}) is "
-                f"missing 'solid_id' -- every row, including 'ignore' rows, "
-                f"must carry a solid_id")
-        row = {"solid_id": b["solid_id"], "role": b.get("role")}
-        if b["solid_id"] in role_ids:
-            if plan.bc_config == "chills":
-                row["chill_effusivity"] = plan.chill_effusivity
-            elif plan.bc_config in ("insulating_sleeve", "exo_sleeve"):
-                row["sleeve_MEF"] = plan.sleeve_MEF
-                row["exo_q0"] = plan.exo_q0
-        rows.append(row)
-    rows.sort(key=lambda r: r["solid_id"])
-    return hashlib.sha256(json.dumps(rows, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
@@ -859,7 +633,7 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
                     hgb_path=DEFAULT_HGB,
                     ood_json="data/features_v2/ood_ranges.json", device=None,
                     tta=0, alloy=None, mold="green_sand", props_json=None,
-                    bodies=None, target_nodes: int = DEFAULT_TARGET_NODES,
+                    target_nodes: int = DEFAULT_TARGET_NODES,
                     hgb_std_path=_USE_DEFAULT,
                     lambda_shrink: float = 1.0, w_total: float = DEFAULT_W_TOTAL,
                     w_std: float = DEFAULT_W_STD, screen_shrinkage: bool = True,
@@ -887,24 +661,6 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
     explicit `elem_size` raises `ValueError` rather than being ignored --
     `elem_size` forces "raw", which never runs the density search at all.
 
-    `bodies` (Part B Task 4): a multi-body STEP's role assignment -- either
-    a list of `{"solid_id": int, "role": ..., "params": {...}}` dicts (see
-    `src.assembly.validate_bodies`) or a `str`/path-like path to a JSON file
-    holding that list (loaded via `json.load`). `None` (the default) is
-    byte-identical to the pre-Part-B behavior: no `validate_bodies` call,
-    `keep_solid_id=None`/`bodies_key="none"` into `get_or_mesh`, no
-    `tag_contact_patches` call, and the film spec/gbm bc_spec stay at their
-    all-sand-mold defaults (see `predict_field`). When given, the flow is
-    `validate_bodies` -> `get_or_mesh(..., keep_solid_id=plan.casting_solid_id,
-    bodies_key=<normalized hash>, post_mesh=<tag_contact_patches closure>)`
-    -> `predict_field(..., bc_plan=plan)`; the resolved `bc_config` and any
-    contact-patch areas are added to the result dict and the summary file.
-    Requires `mesh_mode="prep"` (the effective mode after any `elem_size`
-    override) -- role-based casting-solid selection and contact tagging
-    only run through that pipeline; combining `bodies` with the "raw" mesh
-    path raises `ValueError` rather than silently ignoring the role
-    assignment.
-
     `hgb_std_path` (variance-recomposition Task 3; default changed in Task 6;
     recomposition swapped to `hybrid_field_soft` by soft-anchor Task 3): an
     optional path to a `joblib`-dumped GBM std-head model
@@ -921,8 +677,8 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
     form), to force the quantile-anchor recomposition on ANY checkpoint,
     including the new default film one -- this is byte-identical to the
     pre-Task-3 code. Passing an explicit path (or an already-loaded model
-    object) still requires a film-capable checkpoint (same reasoning as
-    `bodies`: SP1 has no scale-head std target) -- raises `ValueError`
+    object) still requires a film-capable checkpoint (SP1 has no
+    scale-head std target) -- raises `ValueError`
     otherwise, BEFORE meshing. When the soft-anchor recomposition is active,
     the summary file gains a `soft recomposition: a=..., m=...,
     target_unreachable=..., clip_frac=...` line (`target_unreachable`
@@ -981,29 +737,14 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
     `shrinkage screening:` block in the summary, and a `"shrinkage"` key in
     the return dict (the `screen_casting` result minus its bulky per-node
     `niyama`/`porosity_risk` arrays, plus `flagged_frac`/`n_macro_regions`/
-    `n_sinks`/`n_feeders` counts).
-
-    Shrinkage-screening spec ADDENDUM 2 (2026-08-01, owner-approved SCOPED
-    SHIP): the shrinkage dict always carries `"niyama_confidence"` (`"full"`
-    or `"low"`). Gate C (the proxy-Niyama validation) passed both floors on
-    all-sand only (sleeve slices are an owner-accepted intermediate: rho
-    0.768/0.691, below the 0.8 floor) and FAILED on the chill-bearing slice (Spearman rho
-    0.313 -- the proxy `Tdot ~ (TL-TS)/t_s` identity has no way to see a
-    chill's local cooling-rate enhancement). Whenever `bodies` resolves to a
-    `BcPlan` with `bc_config == "chills"`, `"niyama_confidence"` is `"low"`
-    and the summary gains a caveat line naming the Gate C number; bare/
-    all-sand and sleeve-only inputs (`bc_config` `"none"`/
-    `"insulating_sleeve"`/`"exo_sleeve"`) stay `"full"`. The `niyama`/
-    `porosity_risk` VTU fields and the return dict still populate either way
-    (screening stays informative, just honestly labeled) -- macro-shrinkage/
-    top-sink/feeder outputs never depended on Niyama and are unaffected by
-    this label.
-    `False` skips all of that entirely --
-    `"shrinkage"` is `None` and the VTU/summary are byte-identical to the
-    pre-Task-4 contract (no extra fields, no extra summary lines at all --
-    the `shrinkage screening: disabled` line only appears when screening
-    was attempted but internally skipped, e.g. a mesh with no surface nodes
-    to place a feeder against, never for this explicit opt-out).
+    `n_sinks`/`n_feeders` counts). The shrinkage dict carries
+    `"niyama_confidence": "full"` (this release supports the all-sand regime
+    only, where the proxy passed its validation gate). `False` skips all of
+    that entirely -- `"shrinkage"` is `None` and the VTU/summary carry no
+    extra fields (the `shrinkage screening: disabled` line only appears when
+    screening was attempted but internally skipped, e.g. a mesh with no
+    surface nodes to place a feeder against, never for this explicit
+    opt-out).
 
     `gravity` (CLI `--gravity x,y,z`, parsed by `_parse_gravity`): forwarded
     straight to `screen_casting`'s `gravity_vec` (top-sink/feeder placement
@@ -1033,31 +774,6 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
     # fail fast, before potentially lengthy meshing.
     props = resolve_props(alloy=alloy, mold=mold, props_json=props_json)
 
-    plan = None
-    bodies_key = "none"
-    if bodies is not None:
-        if isinstance(bodies, (str, os.PathLike)):
-            with open(osp.expanduser(bodies)) as f:
-                bodies = json.load(f)
-        # No `mef_weights` here (SP4 review I3, 2026-08-08): a mixed-MEF
-        # sleeve set needs contact-patch areas per solid_id, but those only
-        # exist after meshing + `tag_contact_patches`, which have not run
-        # yet at this point -- `validate_bodies` is called here specifically
-        # to build the mesh-cache key (`_bodies_cache_key` below) before any
-        # mesh exists. This is not a regression (every mixed-MEF assembly
-        # was rejected outright before the multi-sleeve ADDENDUM), but it
-        # does mean this CLI/webapp entry point cannot resolve a mixed-MEF
-        # assembly -- it raises naming `mef_weights`, a parameter neither
-        # surface accepts. A caller that needs a mixed-MEF assembly must
-        # mesh and tag first, then call `validate_bodies` again with
-        # `mef_weights=per_body_patch_area_mm2`, exactly as `tools/sp4/
-        # prep.py` + `tools/sp4/score.py` do for the SP4 gold set. Known
-        # gap, not fixed here -- restructuring this function's meshing flow
-        # to do that two-pass resolution is separate work; see the spec's
-        # multi-sleeve ADDENDUM.
-        plan = validate_bodies(bodies)
-        bodies_key = _bodies_cache_key(bodies, plan)
-
     effective_mode = "raw" if elem_size is not None else mesh_mode
     if target_nodes != DEFAULT_TARGET_NODES and effective_mode != "prep":
         raise ValueError(
@@ -1066,24 +782,6 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
             f"elem_size={elem_size!r} forces mesh_mode='raw' -- pinning an "
             f"element size and searching towards a node count are mutually "
             f"exclusive requests. Drop one.")
-    if bodies is not None and effective_mode != "prep":
-        raise ValueError(
-            f"predict_casting: `bodies` requires mesh_mode='prep' (got "
-            f"mesh_mode={mesh_mode!r}, effective_mode={effective_mode!r} -- "
-            f"an explicit elem_size forces 'raw') -- role-based casting-solid "
-            f"selection and contact-patch tagging only run through the "
-            f"prep/get_or_mesh pipeline")
-
-    # Loaded BEFORE meshing so a bodies/non-film-checkpoint mismatch (below)
-    # is caught before tag_contact_patches ever runs -- not merely before
-    # its result is used. A resolved BcPlan (chills/sleeve roles) means
-    # tag_contact_patches would relabel the contact patch "Adiabatic", which
-    # a non-film (SP1) checkpoint's geometry features read AS PHYSICAL
-    # INSULATION. For a chill, that's backwards physics (a chill COOLS,
-    # Adiabatic INSULATES); for a sleeve it's merely uncalibrated. Either
-    # way, SP1 has no BC channel to honor the role assignment at all, so
-    # silently proceeding would both report bc_config as if honored AND
-    # leave a wrong-physics tagged mesh sitting in the mesh cache.
     gnn_ckpt, hgb_path = resolve_artifact(gnn_ckpt), resolve_artifact(hgb_path)
     gnn, hgb, norm, cfg, baseline_norm, hgb_std = load_hybrid(
         gnn_ckpt, hgb_path, device, hgb_std_path=hgb_std_path)
@@ -1096,11 +794,6 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
         hgb_std_path_label = resolve_artifact(DEFAULT_HGB_STD)
     else:
         hgb_std_path_label = str(hgb_std_path)
-    if plan is not None and not cfg.get("film", False):
-        raise ValueError(
-            "predict_casting: bodies/BC roles require the film-conditioned "
-            "v4 stack; the selected checkpoint is not film-capable -- rerun "
-            "without --bodies or with the v4 checkpoints")
     if hgb_std is not None and not cfg.get("film", False):
         raise ValueError(
             "predict_casting: --hgb-std requires the film-conditioned v4 "
@@ -1113,15 +806,7 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
         minfo = {"n_nodes": raw_info["n_nodes"], "n_tets": raw_info["n_tets"],
                 "elem_size": raw_info["elem_size"], "bbox_mm": raw_info["bbox_mm"]}
     elif effective_mode == "prep":
-        keep_solid_id = plan.casting_solid_id if plan is not None else None
-        post_mesh = None
-        if plan is not None and plan.role_solid_ids:
-            def post_mesh(msh_path, _step_path=step_path, _role_ids=plan.role_solid_ids):
-                return tag_contact_patches(msh_path, _step_path, _role_ids)
-
-        prep_info = get_or_mesh(step_path, out_msh, target_nodes=target_nodes,
-                                keep_solid_id=keep_solid_id, bodies_key=bodies_key,
-                                post_mesh=post_mesh)
+        prep_info = get_or_mesh(step_path, out_msh, target_nodes=target_nodes)
         if not prep_info.get("ok", False):
             raise RuntimeError(
                 f"predict_casting: prep meshing pipeline (get_or_mesh) failed for "
@@ -1131,17 +816,11 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
         cache = prep_info.get("cache", "unknown")
         minfo = {"n_nodes": prep_info["n_nodes"], "n_tets": int(mesh.tets.shape[0]),
                 "elem_size": None, "bbox_mm": bbox_mm, "cache": cache}
-        if "per_body_patch_area_mm2" in prep_info:
-            # A cache HIT round-trips through JSON, turning int dict keys
-            # into str -- normalize back to int so callers (and the summary
-            # below) see one consistent shape regardless of hit vs. miss.
-            minfo["per_body_patch_area_mm2"] = {
-                int(k): v for k, v in prep_info["per_body_patch_area_mm2"].items()}
     else:
         raise ValueError(f"predict_casting: mesh_mode must be 'prep' or 'raw', got {mesh_mode!r}")
 
     seconds, feat = predict_field(mesh, gnn, hgb, norm, cfg=cfg, device=device, tta=tta,
-                                  baseline_norm=baseline_norm, props=props, bc_plan=plan,
+                                  baseline_norm=baseline_norm, props=props,
                                   hgb_std=hgb_std, lambda_shrink=lambda_shrink,
                                   w_total=w_total, w_std=w_std)
 
@@ -1162,21 +841,6 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
     shrinkage_extra_point_data = None
     if screen_shrinkage:
         surface_nodes, feed_nodes = _shrinkage_surface_and_feed_nodes(mesh)
-        if plan is not None and plan.role_solid_ids:
-            # Part-B roles task (2026-08-03, replaces review finding I1's
-            # coarse `bc_config == "chills"` special case): recompute
-            # feed_nodes PER BODY ROLE rather than zeroing it out for the
-            # whole input -- only the SLEEVE roles' nodes are ever a feed
-            # source, a chill patch never is, regardless of `bc_config`. See
-            # `_feed_nodes_from_role_patches`'s docstring and this module's
-            # own investigation note (above `_nodes_by_role_from_tagging`)
-            # for why no separate "pre-existing Adiabatic" contribution
-            # needs unioning in here. `_role_aware_feed_nodes` (review round
-            # 1, H1) additionally guards against a LEGACY mesh-cache HIT
-            # whose side-car predates this task (no `nodes_by_solid` at
-            # all) -- see its own docstring.
-            nodes_by_solid = prep_info.get("nodes_by_solid", {})
-            feed_nodes = _role_aware_feed_nodes(step_path, nodes_by_solid, plan, feed_nodes)
         if surface_nodes.size == 0:
             logger.warning(
                 "predict_casting: no surface nodes found on the meshed part -- "
@@ -1212,18 +876,9 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
                 shrinkage["niyama_source"] = "learned"
             if alloy_family_assumed:
                 shrinkage["alloy_family_assumed"] = True
-            # Spec ADDENDUM 2 (2026-08-01, owner-approved scoped ship): Gate C
-            # failed on the chill-bearing slice (rho 0.313) -- proxy Niyama
-            # cannot see a chill's local cooling-rate enhancement, so mark it
-            # low-confidence whenever the input's BC plan has a CHILL role
-            # (`plan.bc_config == "chills"`; bare/all-sand and sleeve-only
-            # inputs, whose bc_config is "none"/"insulating_sleeve"/
-            # "exo_sleeve", are unaffected and stay "full"). Macro-shrinkage/
-            # sinks/feeders don't depend on Niyama at all and keep full scope
-            # regardless -- only this confidence LABEL changes, no output is
-            # withheld ("screening stays informative").
-            shrinkage["niyama_confidence"] = (
-                "low" if (plan is not None and plan.bc_config == "chills") else "full")
+            # This release covers the all-sand regime only, where the
+            # proxy Niyama passed its validation gate.
+            shrinkage["niyama_confidence"] = "full"
             shrinkage_extra_point_data = _shrinkage_extra_point_data(mesh, shrinkage_full)
 
     vtu = osp.join(out_dir, f"{name}.vtu")
@@ -1241,8 +896,6 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
     elem_size_label = (f"{minfo['elem_size']:.2f} mm" if minfo["elem_size"] is not None
                        else "n/a (density-searched)")
     cache_label = minfo.get("cache") if effective_mode == "prep" else "n/a (raw mode)"
-    bc_config = plan.bc_config if plan is not None else "none"
-    patch_areas = minfo.get("per_body_patch_area_mm2", {})
     with open(summary, "w") as f:
         f.write(f"casting: {name}\n")
         f.write(f"total solidification time: {total:.1f} s\n")
@@ -1251,16 +904,6 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
         f.write(f"mesh_mode: {effective_mode}  cache: {cache_label}  nodes: {minfo['n_nodes']}  "
                 f"tets: {minfo['n_tets']}  elem_size: {elem_size_label}  bbox_mm: "
                 f"{tuple(round(v,1) for v in minfo['bbox_mm'])}\n")
-        f.write(f"bc_config: {bc_config}\n")
-        if plan is not None:
-            for b in bodies:
-                sid = b.get("solid_id")
-                line = f"  body solid_id={sid} role={b.get('role')}"
-                if b.get("params"):
-                    line += f" params={b['params']}"
-                if sid in patch_areas:
-                    line += f" patch_area_mm2={patch_areas[sid]:.1f}"
-                f.write(line + "\n")
         if feat.get("recomposition") == "soft":
             info = feat["recomposition_info"]
             line = (f"soft recomposition: a={info['a']:.4f}, m={info['m']:.4f}, "
@@ -1310,8 +953,7 @@ def predict_casting(step_path, out_dir="runs/castings", elem_size=None,
     result = {"name": name, "vtu": vtu, "summary": summary, "total_time_s": total,
               "mesh_mode": effective_mode, "n_nodes": minfo["n_nodes"],
               "elem_size": minfo["elem_size"], "ood_warnings": warnings,
-              "hotspot_xyz": hot_xyz, "bc_config": bc_config,
-              "per_body_patch_area_mm2": patch_areas,
+              "hotspot_xyz": hot_xyz,
               "recomposition": recomposition,
               "recomposition_info": recomposition_info,
               "shrinkage": shrinkage}
@@ -1370,16 +1012,6 @@ if __name__ == "__main__":
                     help="named mold system; only used by film/v4 checkpoints")
     ap.add_argument("--props", dest="props_json", default=None,
                     help="path to a JSON file overriding alloy/mold with raw material properties")
-    ap.add_argument("--bodies", dest="bodies_json", default=None,
-                    help="path to a JSON file describing a multi-body STEP's role "
-                         "assignment (Part B): a list of {\"solid_id\": int, \"role\": "
-                         "\"casting\"|\"chill\"|\"insulating_sleeve\"|\"exo_sleeve\"|"
-                         "\"ignore\", \"params\": {...} (optional, role-dependent)}. "
-                         "Example: [{\"solid_id\": 1, \"role\": \"casting\"}, "
-                         "{\"solid_id\": 2, \"role\": \"chill\", \"params\": "
-                         "{\"material\": \"cast_iron\"}}]. Requires --mesh-mode prep "
-                         "(the default) -- role-based casting-solid selection and "
-                         "contact-patch tagging only run through that pipeline.")
     ap.add_argument("--no-shrinkage", dest="screen_shrinkage", action="store_false",
                     help="disable shrinkage-porosity screening (SP2): by default, "
                          "predict_casting runs src.shrinkage.screen_casting on the "
@@ -1399,11 +1031,11 @@ if __name__ == "__main__":
                         mesh_mode=a.mesh_mode,
                         gnn_ckpt=a.gnn_ckpt, hgb_path=a.hgb_path,
                         alloy=a.alloy, mold=a.mold, props_json=a.props_json,
-                        bodies=a.bodies_json, hgb_std_path=a.hgb_std_path,
+                        hgb_std_path=a.hgb_std_path,
                         lambda_shrink=a.lambda_shrink, w_total=a.w_total, w_std=a.w_std,
                         screen_shrinkage=a.screen_shrinkage,
                         gravity=a.gravity)
     print(f"{r['name']}: total {r['total_time_s']:.1f}s  mesh_mode {r['mesh_mode']}  "
-          f"nodes {r['n_nodes']}  bc_config {r['bc_config']}  -> {r['vtu']}")
+          f"nodes {r['n_nodes']}  -> {r['vtu']}")
     for w in r["ood_warnings"]:
         print("WARNING:", w)

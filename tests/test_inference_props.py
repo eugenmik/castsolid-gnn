@@ -5,20 +5,22 @@ from src.shrinkage import SHRINKAGE_PCT
 
 REQ = {"k", "rho", "cp", "L_kJ_kg", "TL", "TS", "Tpour", "mold_effusivity"}
 
-def test_default_is_gjl250_green_sand():
+def test_default_is_gjs400_green_sand():
     p = resolve_props()
     assert set(p) == REQ and all(isinstance(v, float) for v in p.values())
-    assert p["TL"] == 1220.0 and p["TS"] == 1150.0          # EN-GJL-250 row
-    assert p["Tpour"] == pytest.approx((1310 + 1330) / 2)    # midpoint rule
+    assert p["TL"] == 1160.0 and p["TS"] == 1120.0          # EN-GJS-400-15 row
+    assert p["Tpour"] == pytest.approx((1250 + 1270) / 2)    # midpoint rule
     assert p["mold_effusivity"] == pytest.approx(1018.0)     # molds.csv, NOT 1250
 
 def test_named_alloy_and_lists():
-    assert DEFAULT_ALLOY in list_alloys() and "green_sand" in list_molds()
-    p = resolve_props(alloy="EN-GJS-400-15")
-    assert p["TS"] == 1120.0
+    assert DEFAULT_ALLOY in list_alloys()
+    assert list_alloys() == ["EN-GJS-400-15", "G20Mn5"]
+    assert list_molds() == ["green_sand"]
+    p = resolve_props(alloy="G20Mn5")
+    assert p["TS"] == 1495.0
 
 def test_unknown_names_raise_listing_options():
-    with pytest.raises(ValueError, match="EN-GJL-250"):
+    with pytest.raises(ValueError, match="EN-GJS-400-15"):
         resolve_props(alloy="unobtainium")
     with pytest.raises(ValueError, match="green_sand"):
         resolve_props(mold="vacuum")
@@ -61,8 +63,9 @@ def test_named_alloy_tl_ts_still_valid_after_i2_guard():
     # validated by tools.doe.load_properties.load_materials's own TS<TL<Tpour
     # check at CSV-load time -- this just proves resolve_props's OWN check
     # doesn't double-reject a legitimately-ordered grade).
-    p = resolve_props(alloy="EN-GJL-250")
-    assert p["TL"] > p["TS"]
+    for grade in list_alloys():
+        p = resolve_props(alloy=grade)
+        assert p["TL"] > p["TS"]
 
 
 # --------------------------------------------------------------------------- #
@@ -83,8 +86,8 @@ def test_resolve_alloy_family_known_prefixes():
 
 
 def test_resolve_alloy_family_default_alloy_when_none():
-    # None -> DEFAULT_ALLOY (EN-GJL-250) -> grey_iron, not assumed.
-    assert resolve_alloy_family(None) == ("grey_iron", False)
+    # None -> DEFAULT_ALLOY (EN-GJS-400-15) -> ductile_iron, not assumed.
+    assert resolve_alloy_family(None) == ("ductile_iron", False)
 
 
 def test_resolve_alloy_family_unknown_prefix_falls_back_loud():
