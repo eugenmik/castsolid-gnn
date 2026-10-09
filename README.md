@@ -16,7 +16,7 @@ difficulty and shrinkage risk; they are not porosity labels.
 
 ## Model weights
 
-The trained v5.1 weights are published on Hugging Face as CastSolid GNN, under Apache-2.0:
+The trained v5.1 weights are published on Hugging Face under Apache-2.0:
 
 **[huggingface.co/eugenmik/castsolid-gnn](https://huggingface.co/eugenmik/castsolid-gnn)**
 
