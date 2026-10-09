@@ -1,5 +1,6 @@
 """predict_casting orchestration with meshing and the model replaced by fakes,
-plus an end-to-end run on a synthetic STEP when the weights are present."""
+plus an end-to-end run on a synthetic STEP with the published weights
+(enabled with CASTSOLID_HUB_TESTS=1)."""
 import os
 import shutil
 
@@ -13,6 +14,9 @@ from src.msh_parse import parse_msh
 
 
 class _FakeModel:
+    version = "v5.1"
+    ood_ranges_path = None
+
     def predict_with_props(self, mesh, props):
         n = mesh.node_xyz.shape[0]
         X = np.zeros((n, len(FEATURE_NAMES)), np.float32)
@@ -83,8 +87,17 @@ def test_parse_gravity():
             pc._parse_gravity(bad)
 
 
-@pytest.mark.skipif(not os.path.exists("weights/gnn_v5.1.safetensors"),
-                    reason="published weights not present")
+def test_runs_with_a_local_weights_folder(monkeypatch, mini_msh_file, tiny_weights_dir,
+                                         tmp_path):
+    monkeypatch.setattr(pc, "get_or_mesh", _fake_get_or_mesh(mini_msh_file, []))
+    r = pc.predict_casting("part.step", out_dir=str(tmp_path), weights_dir=tiny_weights_dir,
+                           device="cpu")
+    assert r["ood_warnings"] == [] and r["total_time_s"] > 0
+    assert "model: test" in open(r["summary"]).read()
+
+
+@pytest.mark.skipif(not os.environ.get("CASTSOLID_HUB_TESTS"),
+                    reason="set CASTSOLID_HUB_TESTS=1 to download the published weights")
 def test_end_to_end_on_a_box(tmp_path):
     import gmsh
     step = tmp_path / "box.step"

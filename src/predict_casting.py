@@ -5,7 +5,8 @@
 Steps: mesh the STEP file (healed, density-searched and cached, or at a fixed
 element size with --elem-size), run the model, check the training envelope,
 screen for shrinkage, and write `<name>.vtu`, `<name>_summary.txt` and the
-mesh `<name>.msh` to the output directory.
+mesh `<name>.msh` to the output directory. The model weights come from the
+Hugging Face Hub unless --weights-dir points at a local copy.
 """
 from __future__ import annotations
 
@@ -27,7 +28,6 @@ from src.shrinkage import screen_casting
 
 logger = logging.getLogger(__name__)
 
-MODEL_VERSION = "v5.1"
 _VOL_IDX = FEATURE_NAMES.index("volume_mm3")
 _GCOOL_IDX = FEATURE_NAMES.index("geodesic_d_cool")
 
@@ -143,15 +143,16 @@ def predict_casting(step_path, out_dir="runs/castings", alloy=None, mold=DEFAULT
                     props_json=None, elem_size=None,
                     target_nodes: int = DEFAULT_TARGET_NODES,
                     screen_shrinkage: bool = True, gravity: tuple = (0, 0, -1),
-                    model: CastSolidModel | None = None, weights_dir: str = "weights",
+                    model: CastSolidModel | None = None, weights_dir: str | None = None,
                     ood_json: str | None = None, cache_dir: str = "runs/mesh_cache",
                     device: str | None = None) -> dict:
     """Mesh `step_path`, predict, and write the result files.
 
     `alloy`/`mold` name rows of `data/properties/` (default EN-GJS-400-15 in
     green sand); `props_json` replaces both. `elem_size` (mm) meshes at a
-    fixed size instead of searching for `target_nodes`. Pass a loaded
-    `model` to reuse it across calls.
+    fixed size instead of searching for `target_nodes`. The model is
+    downloaded from the Hugging Face Hub unless `weights_dir` names a local
+    copy; pass a loaded `model` to reuse it across calls.
 
     Returns {name, vtu, summary, msh, total_time_s, hotspot_xyz (5 x 3 mm),
     ood_warnings, n_nodes, mesh_mode, elem_size, cache, recomposition_info,
@@ -164,15 +165,17 @@ def predict_casting(step_path, out_dir="runs/castings", alloy=None, mold=DEFAULT
 
     # Resolve properties before meshing so a bad alloy name fails fast.
     props = resolve_props(alloy=alloy, mold=mold, props_json=props_json)
-    model = model or CastSolidModel(weights_dir=weights_dir, device=device)
+    if model is None:
+        model = (CastSolidModel(weights_dir, device=device) if weights_dir
+                 else CastSolidModel.from_pretrained(device=device))
 
     mesh, minfo = _mesh(step_path, out_msh, elem_size, target_nodes, cache_dir)
     seconds, details = model.predict_with_props(mesh, props)
     X = details["X"]
 
     warnings = []
-    ood_json = ood_json or osp.join(weights_dir, "ood_ranges.json")
-    if osp.exists(ood_json):
+    ood_json = ood_json or getattr(model, "ood_ranges_path", None)
+    if ood_json and osp.exists(ood_json):
         diag = float(np.linalg.norm(mesh.node_xyz.max(0) - mesh.node_xyz.min(0)))
         warnings = _ood.ood_flags(float(X[0, _VOL_IDX]), diag, float(X[:, _GCOOL_IDX].max()),
                                   _ood.load_ranges(ood_json))
@@ -213,7 +216,8 @@ def predict_casting(step_path, out_dir="runs/castings", alloy=None, mold=DEFAULT
     with open(summary, "w") as f:
         f.write(f"casting: {name}\n")
         f.write(f"total solidification time: {total:.1f} s\n")
-        f.write(f"alloy: {alloy_label}  mold: {mold_label}  model: {MODEL_VERSION}\n")
+        f.write(f"alloy: {alloy_label}  mold: {mold_label}  "
+                f"model: {getattr(model, 'version', 'unknown')}\n")
         f.write(f"mesh: {minfo['mode']}  cache: {minfo['cache']}  nodes: {minfo['n_nodes']}  "
                 f"tets: {minfo['n_tets']}  elem_size: {elem_label}  bbox_mm: {bbox_mm}\n")
         line = (f"recomposition: a={info['a']:.4f}, m={info['m']:.4f}, "
@@ -268,7 +272,9 @@ def main(argv=None):
                          "(default 0,0,-1)")
     ap.add_argument("--no-shrinkage", dest="screen_shrinkage", action="store_false",
                     help="skip the shrinkage screening")
-    ap.add_argument("--weights-dir", default="weights")
+    ap.add_argument("--weights-dir", default=None,
+                    help="local folder with config.json and the weight files "
+                         "(default: download from the Hugging Face Hub)")
     a = ap.parse_args(argv)
     r = predict_casting(a.step_path, out_dir=a.out_dir, alloy=a.alloy, mold=a.mold,
                         props_json=a.props_json, elem_size=a.elem_size,

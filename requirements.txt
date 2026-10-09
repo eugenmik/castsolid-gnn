@@ -7,6 +7,7 @@ scipy>=1.11
 scikit-learn==1.5.2
 skops>=0.10
 safetensors>=0.4
+huggingface_hub>=0.23
 torch-geometric==2.7.0
 gmsh>=4.13
 meshio>=5.3

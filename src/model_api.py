@@ -1,15 +1,20 @@
 """Mesh in, solidification-time field out.
 
     from src.model_api import CastSolidModel
-    model = CastSolidModel()                       # loads weights/ once
+    model = CastSolidModel.from_pretrained()       # weights from the Hugging Face Hub
     seconds = model.predict("part.msh", alloy="G20Mn5")
 
 `predict` takes a gmsh 2.2 ASCII tetrahedral mesh (a path or a parsed
 `src.msh_parse.Mesh`) whose cooling surface is tagged "Cooling", and returns
 the solidification time in seconds for every node, in the mesh's node order.
+
+The weights live at https://huggingface.co/eugenmik/castsolid-gnn.
+`from_pretrained` downloads them once into the local Hugging Face cache;
+`CastSolidModel(weights_dir)` loads them from a local folder instead.
 """
 from __future__ import annotations
 
+import json
 import os
 
 import numpy as np
@@ -23,24 +28,50 @@ from src.model_gnn import load_gnn, predict_graph_seconds
 from src.msh_parse import Mesh, parse_msh
 from src.release_io import load_gbm, load_gnn_state
 
-# Recomposition weights of the published model (see src/hybrid.py).
-W_TOTAL = 1.0
-W_STD = 4.0
-
-GNN_FILE = "gnn_v5.1.safetensors"
-TOTAL_HEAD_FILE = "gbm_total_v3.skops"
-SPREAD_HEAD_FILE = "gbm_std_v2.skops"
+HF_REPO_ID = "eugenmik/castsolid-gnn"
+HF_REVISION = "v5.1"
+CONFIG_FILE = "config.json"
 
 
 class CastSolidModel:
-    def __init__(self, weights_dir: str = "weights", device: str | None = None):
+    def __init__(self, weights_dir: str, device: str | None = None):
+        """Load the model from a folder holding `config.json` and the files it
+        lists (the layout of the Hugging Face repository)."""
+        with open(os.path.join(weights_dir, CONFIG_FILE)) as f:
+            self.config = json.load(f)
+        files = self.config["files"]
+        rec = self.config["recomposition"]
+        self.weights_dir = weights_dir
+        self.version = self.config["version"]
+        self.q, self.w_total, self.w_std = rec["quantile"], rec["w_total"], rec["w_std"]
+        self.ood_ranges_path = os.path.join(weights_dir, files["ood_ranges"])
+
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        state = load_gnn_state(os.path.join(weights_dir, GNN_FILE), self.device)
+        state = load_gnn_state(os.path.join(weights_dir, files["gnn"]), self.device)
         self.gnn, self.cfg, self.norm = load_gnn(state, self.device)
-        self.total_head = load_gbm(os.path.join(weights_dir, TOTAL_HEAD_FILE))
-        self.spread_head = load_gbm(os.path.join(weights_dir, SPREAD_HEAD_FILE))
+        self.total_head = load_gbm(os.path.join(weights_dir, files["total_head"]))
+        self.spread_head = load_gbm(os.path.join(weights_dir, files["spread_head"]))
         gbm_heads.check_head(self.total_head, gbm_heads.N_TOTAL_FEATURES, "total-time")
         gbm_heads.check_head(self.spread_head, gbm_heads.N_SPREAD_FEATURES, "spread")
+
+    @classmethod
+    def from_pretrained(cls, repo_id: str = HF_REPO_ID, revision: str | None = HF_REVISION,
+                        device: str | None = None, cache_dir: str | None = None
+                        ) -> "CastSolidModel":
+        """Download the model files from the Hugging Face Hub (once; later
+        calls use the local cache) and load them. `revision` pins a tag,
+        branch or commit; None means the latest version."""
+        from huggingface_hub import hf_hub_download
+
+        def fetch(name):
+            return hf_hub_download(repo_id, name, revision=revision, cache_dir=cache_dir)
+
+        config_path = fetch(CONFIG_FILE)
+        with open(config_path) as f:
+            files = json.load(f)["files"]
+        for name in files.values():
+            fetch(name)
+        return cls(os.path.dirname(config_path), device=device)
 
     def predict(self, mesh: str | Mesh, alloy: str | None = None, mold: str = DEFAULT_MOLD,
                 props_json: str | None = None) -> np.ndarray:
@@ -67,8 +98,8 @@ class CastSolidModel:
         total = gbm_heads.predict_total_seconds(self.total_head, row)
         spread = gbm_heads.predict_spread_seconds(self.spread_head,
                                                   gbm_heads.spread_row(row, X))
-        seconds, info = hybrid_field_soft(gnn_seconds, total, spread,
-                                          w_total=W_TOTAL, w_std=W_STD)
+        seconds, info = hybrid_field_soft(gnn_seconds, total, spread, q=self.q,
+                                          w_total=self.w_total, w_std=self.w_std)
         return seconds, {"X": X, "total_s": total, "spread_s": spread,
                          "recomposition": info}
 

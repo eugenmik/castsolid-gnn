@@ -7,7 +7,7 @@ out-of-distribution warnings and a shrinkage screening layer. A small local web 
 same from a browser.
 
 The model itself, with its architecture, training data, evaluation and limitations, is published
-and documented on Hugging Face:
+and documented on Hugging Face. The code downloads the weights from there on first use:
 
 **[huggingface.co/eugenmik/castsolid-gnn](https://huggingface.co/eugenmik/castsolid-gnn)**
 
@@ -71,15 +71,19 @@ source .venv/bin/activate
 pip install "torch==2.3.0" --index-url https://download.pytorch.org/whl/cpu
 pip install torch-cluster -f https://data.pyg.org/whl/torch-2.3.0+cpu.html
 pip install -r requirements.txt
-pytest -q
+pytest -q                          # offline; CASTSOLID_HUB_TESTS=1 also tests the published weights
 ```
 
 For a GPU build, replace `cpu` with your CUDA tag (for example `cu121`) in both URLs.
 
-Then download the model weights from Hugging Face into `weights/`:
+You do not need to download the model separately. On the first prediction the code fetches the
+weights (about 9 MB, the `v5.1` tag of the Hugging Face repository) into the local Hugging Face
+cache, and later runs work offline. To use a local copy instead, download it once and point the
+code at the folder:
 
 ```bash
-hf download eugenmik/castsolid-gnn --include "weights/*" --local-dir .
+hf download eugenmik/castsolid-gnn --revision v5.1 --local-dir castsolid-weights
+python -m src.predict_casting part.step --weights-dir castsolid-weights
 ```
 
 ### Gmsh
@@ -122,6 +126,7 @@ Useful options:
 - `--no-shrinkage` skips the shrinkage screening.
 - `--elem-size` meshes with a fixed element size in mm instead of the density search. The
   result is then outside the density the model was trained on.
+- `--weights-dir` loads the model from a local folder instead of the Hugging Face cache.
 
 ### Python
 
@@ -137,8 +142,14 @@ r["vtu"], r["summary"] # output file paths
 ```
 
 If you already have a mesh in gmsh 2.2 format with the cooling surface tagged, you can skip the
-CAD steps and call the model directly with `src.model_api.CastSolidModel`; the Hugging Face model
-card shows how.
+CAD steps and call the model directly:
+
+```python
+from src.model_api import CastSolidModel
+
+model = CastSolidModel.from_pretrained()   # or CastSolidModel("castsolid-weights")
+seconds = model.predict("part.msh", alloy="G20Mn5")
+```
 
 ### Web viewer
 
