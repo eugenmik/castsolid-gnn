@@ -12,7 +12,7 @@ and documented on Hugging Face. The code downloads the weights from there on fir
 **[huggingface.co/eugenmik/castsolid-gnn](https://huggingface.co/eugenmik/castsolid-gnn)**
 
 <p align="center">
-  <img src="assets/solidification.gif" alt="Predicted solidification playback" width="720"><br>
+  <img src="assets/solidification.webp" alt="Predicted solidification playback" width="720"><br>
   <em>A predicted field played back in the viewer. Solidified material turns translucent while
   the remaining liquid contracts toward the hot spot.</em>
 </p>
