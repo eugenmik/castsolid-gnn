@@ -11,6 +11,9 @@ and documented on Hugging Face. The code downloads the weights from there on fir
 
 **[huggingface.co/eugenmik/castsolid-gnn](https://huggingface.co/eugenmik/castsolid-gnn)**
 
+Predictions for four example parts can be explored in 3D in the
+[demo Space](https://huggingface.co/spaces/eugenmik/castsolid-gnn-demo) without installing anything.
+
 <p align="center">
   <img src="assets/solidification.webp" alt="Predicted solidification playback" width="720"><br>
   <em>A predicted field played back in the viewer. Solidified material turns translucent while
