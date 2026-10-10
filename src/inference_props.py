@@ -21,8 +21,9 @@ DEFAULT_MOLD = "green_sand"
 
 _REQUIRED_KEYS = ("k", "rho", "cp", "L_kJ_kg", "TL", "TS", "Tpour", "mold_effusivity")
 
-_MATERIALS_PATH = "data/properties/materials.csv"
-_MOLDS_PATH = "data/properties/molds.csv"
+_PROPERTIES_DIR = Path(__file__).resolve().parents[1] / "data" / "properties"
+_MATERIALS_PATH = str(_PROPERTIES_DIR / "materials.csv")
+_MOLDS_PATH = str(_PROPERTIES_DIR / "molds.csv")
 
 # Family used for shrinkage severity when the alloy family is unknown (a raw
 # property file has no grade). Steel has the largest shrinkage, so this errs

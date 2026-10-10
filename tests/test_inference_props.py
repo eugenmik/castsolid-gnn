@@ -100,3 +100,12 @@ def test_resolve_alloy_family_covers_every_catalog_grade_exactly():
             f"(resolved family={family!r}) -- add a matching prefix to "
             f"src.inference_props._ALLOY_FAMILY_PREFIXES")
         assert family in SHRINKAGE_PCT
+
+
+def test_tables_are_found_from_any_working_directory(tmp_path, monkeypatch):
+    import src.inference_props as ip
+    monkeypatch.setattr(ip, "_materials_cache", None)
+    monkeypatch.setattr(ip, "_molds_cache", None)
+    monkeypatch.chdir(tmp_path)
+    assert ip.list_alloys() == ["EN-GJS-400-15", "G20Mn5"]
+    assert ip.list_molds() == ["green_sand"]

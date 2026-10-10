@@ -1,7 +1,7 @@
-# Install PyTorch 2.3 for your platform first, plus the matching torch-cluster
-# wheel, for example on CPU:
-#   pip install "torch==2.3.0" --index-url https://download.pytorch.org/whl/cpu
-#   pip install torch-cluster -f https://data.pyg.org/whl/torch-2.3.0+cpu.html
+# Install PyTorch 2.8 or newer for your platform first, plus the matching
+# torch-cluster wheel, for example on CPU:
+#   pip install "torch==2.11.0" --index-url https://download.pytorch.org/whl/cpu
+#   pip install torch-cluster -f https://data.pyg.org/whl/torch-2.11.0+cpu.html
 numpy>=2.0
 scipy>=1.11
 scikit-learn==1.5.2

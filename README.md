@@ -62,19 +62,21 @@ flowchart LR
 
 ## Installation
 
-Create a Python 3.11 environment. Install PyTorch 2.3 and the matching `torch-cluster` wheel
-for your CPU or CUDA setup, then the remaining dependencies:
+Create a Python 3.12 environment (3.11 works too). Install PyTorch 2.8 or newer and the
+matching `torch-cluster` wheel for your CPU or CUDA setup, then the remaining dependencies:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install "torch==2.3.0" --index-url https://download.pytorch.org/whl/cpu
-pip install torch-cluster -f https://data.pyg.org/whl/torch-2.3.0+cpu.html
+pip install "torch==2.11.0" --index-url https://download.pytorch.org/whl/cpu
+pip install torch-cluster -f https://data.pyg.org/whl/torch-2.11.0+cpu.html
 pip install -r requirements.txt
 pytest -q                          # offline; CASTSOLID_HUB_TESTS=1 also tests the published weights
 ```
 
-For a GPU build, replace `cpu` with your CUDA tag (for example `cu121`) in both URLs.
+For a GPU build, replace `cpu` with your CUDA tag (for example `cu128`) in both URLs, and for
+another PyTorch version change the version in both. Predictions with PyTorch 2.11 match those
+with PyTorch 2.3, the version the model was trained with, to within float32 rounding.
 
 You do not need to download the model separately. On the first prediction the code fetches the
 weights (about 9 MB, the `v5.1` tag of the Hugging Face repository) into the local Hugging Face
